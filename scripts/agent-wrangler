@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 Agent Wrangler shortcuts:
+  start
+    -> routed to: teams up --rebuild --mode import --startup --agent --nav --manager --manager-replace
   up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|drift
     -> routed to: teams <command>
   fleet ...
@@ -16,6 +18,7 @@ Agent Wrangler shortcuts:
     -> routed to: ui
 
 Examples:
+  ./scripts/agent-wrangler start
   ./scripts/agent-wrangler up --rebuild --mode import --max-panes 10 --nav --manager --manager-replace
   ./scripts/agent-wrangler fleet manager --replace --update-defaults
   ./scripts/agent-wrangler drift --fleet --alert-dirty 25
@@ -29,6 +32,10 @@ EOF
 fi
 
 case "${1:-}" in
+  start)
+    shift
+    set -- teams up --rebuild --mode import --max-panes "${AW_MAX_PANES:-10}" --startup --agent --nav --manager --manager-replace "$@"
+    ;;
   up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|drift)
     set -- teams "$@"
     ;;

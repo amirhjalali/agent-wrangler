@@ -1756,7 +1756,7 @@ def run_palette(_: argparse.Namespace) -> int:
     print(f"6. {PRIMARY_CLI} antfarm overnight --iterations 1")
     print(f"7. {PRIMARY_CLI} antfarm overnight --apply --iterations 1")
     print(f"8. {PRIMARY_CLI} gastown add --title \"...\" --repo <repo-id> --lane now --step \"...\"")
-    print(f"9. {PRIMARY_CLI} up --rebuild --mode import --max-panes 10 --nav --manager --manager-replace")
+    print(f"9. {PRIMARY_CLI} start")
     print(f"10. {PRIMARY_CLI} manager --replace")
     print(f"11. {PRIMARY_CLI} nav")
     print(f"12. {PRIMARY_CLI} status")

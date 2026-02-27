@@ -1741,22 +1741,33 @@ def run_drift(args: argparse.Namespace) -> int:
 
 def run_nav(args: argparse.Namespace) -> int:
     ensure_tmux()
-    bindings = [
+    pane_bindings = [
         ("M-Left", ["select-pane", "-L"]),
         ("M-Right", ["select-pane", "-R"]),
         ("M-Up", ["select-pane", "-U"]),
         ("M-Down", ["select-pane", "-D"]),
     ]
+    window_bindings = [
+        ("M-[", ["previous-window"]),
+        ("M-]", ["next-window"]),
+    ]
+    index_bindings: list[tuple[str, list[str]]] = []
+    for idx in range(1, 10):
+        index_bindings.append((f"M-{idx}", ["select-window", "-t", f":{idx - 1}"]))
+    all_bindings = pane_bindings + window_bindings + index_bindings
+
     if args.remove:
-        for key, _cmd in bindings:
+        for key, _cmd in all_bindings:
             tmux(["unbind-key", "-n", key], timeout=5)
-        print("Removed no-prefix Alt+Arrow pane navigation bindings.")
+        print("Removed no-prefix Alt navigation bindings (pane + window).")
         return 0
 
-    for key, cmd in bindings:
+    for key, cmd in all_bindings:
         tmux(["bind-key", "-n", key, *cmd], timeout=5)
-    print("Enabled no-prefix Alt+Arrow pane navigation bindings.")
-    print("Use Option+Arrow to move between panes.")
+    print("Enabled no-prefix Alt navigation bindings.")
+    print("Pane navigation: Option+Arrow")
+    print("Window navigation: Option+[ / Option+]")
+    print("Window direct jump: Option+1..9")
     return 0
 
 
@@ -2008,7 +2019,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     manager.add_argument("--no-attach", dest="attach", action="store_false")
     manager.set_defaults(handler=run_manager)
 
-    nav = teams_sub.add_parser("nav", help="Enable Option+Arrow pane navigation without tmux prefix")
+    nav = teams_sub.add_parser("nav", help="Enable no-prefix Option navigation for panes and windows")
     nav.add_argument("--remove", action="store_true", help="Remove bindings")
     nav.set_defaults(handler=run_nav)
 

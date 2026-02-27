@@ -1,6 +1,81 @@
-# AmirWorkflow
+# Agent Wrangler
 
 A machine-level control layer for managing many repos, terminals, and Linear queues without losing context.
+
+## Getting Started Guide
+
+From a fresh terminal:
+
+```bash
+cd /Users/amirjalali/agent-wrangler
+```
+
+Prerequisites:
+
+```bash
+brew install tmux
+```
+
+### 1) Import your current Ghostty work into tmux
+
+Preview first:
+
+```bash
+./scripts/agent-wrangler import --dry-run --max-panes 10 --layout auto
+```
+
+Create full grid + manager + nav + detected agents in one command:
+
+```bash
+./scripts/agent-wrangler start
+```
+
+### 2) Start the fleet command center (manager-over-managers)
+
+```bash
+./scripts/agent-wrangler fleet set --sessions amir-grid
+./scripts/agent-wrangler fleet manager --replace --update-defaults
+./scripts/agent-wrangler fleet status
+```
+
+### 3) Check repo drift and attention quickly
+
+```bash
+./scripts/agent-wrangler drift --fleet --alert-dirty 25
+./scripts/agent-wrangler fleet watch --interval 3
+```
+
+### 4) Run the program engine (team + loops + phase gates)
+
+```bash
+./scripts/agent-wrangler program init
+./scripts/agent-wrangler program status
+./scripts/agent-wrangler program phases --refresh-state
+./scripts/agent-wrangler program plan --write-report
+```
+
+### 5) Run unattended loop mode
+
+Dry-run guardrails (safe):
+
+```bash
+./scripts/agent-wrangler program daemon
+```
+
+Apply guardrails (can stop overflow/waiting sessions):
+
+```bash
+./scripts/agent-wrangler program daemon --apply-guardrails
+```
+
+### 6) Fast control cheatsheet
+
+```bash
+./scripts/agent-wrangler start
+./scripts/agent-wrangler fleet jump
+./scripts/agent-wrangler fleet popup
+./scripts/agent-wrangler palette
+```
 
 ## Why this exists
 
@@ -33,7 +108,7 @@ Use this as your default daily flow:
 
 ## Commands
 
-From `/Users/amirjalali/AmirWorkflow`:
+From `/Users/amirjalali/agent-wrangler`:
 
 ```bash
 # Full snapshot + report files in reports/
@@ -113,6 +188,7 @@ Use this when you want a real operator grid similar to "team sessions":
 
 ```bash
 # Simplest launcher (one command)
+./scripts/agent-wrangler start
 ./scripts/hq --rebuild --mode import --max-panes 10
 ./scripts/hq --rebuild --mode import --max-panes 10 --nav --manager --manager-replace
 
@@ -190,6 +266,7 @@ Use this when you want a real operator grid similar to "team sessions":
 Notes:
 - `hq` is a thin shortcut for `agent-wrangler up`.
 - `cc` and `teams` are still available as legacy aliases.
+- `agent-wrangler start` is the default startup command: Ghostty import + startup commands + detected agents + nav + manager.
 - `fleet manager` creates a dedicated HQ tmux session that monitors all managed sessions in real time.
 - `fleet set` lets you pin exactly which tmux sessions count as your operating universe.
 - `drift --fleet` gives a fast per-project branch/dirty summary across active sessions.
@@ -203,7 +280,10 @@ Notes:
 - `import` is safe by default: startup commands and agent relaunch are disabled unless you pass `--startup` and/or `--agent`.
 - `teams up` gives one command behavior: reuse existing grid if present, or build from import/bootstrap and attach.
 - `teams paint/watch/manager` sets pane borders to green/yellow/red based on attention signals (waiting/error markers/activity).
-- In tmux, standard pane navigation is `Ctrl-b` + arrows. `teams nav` enables `Option+Arrow` no-prefix movement.
+- In tmux, standard pane navigation is `Ctrl-b` + arrows. `teams nav` enables no-prefix navigation:
+  - pane: `Option+Arrow`
+  - window cycle: `Option+[` and `Option+]`
+  - window jump: `Option+1..9`
 - `bootstrap` can auto-run each repo's `startup_command`. Use `--no-startup` to disable.
 - Add `--agent codex` or `--agent claude` during `bootstrap` to launch the same agent command in every pane.
 
@@ -242,7 +322,7 @@ The script will call the Linear GraphQL API and pull assigned, non-completed iss
 
 ## Current project registry
 
-Edit `/Users/amirjalali/AmirWorkflow/config/projects.json` to keep this accurate.
+Edit `/Users/amirjalali/agent-wrangler/config/projects.json` to keep this accurate.
 
 Best practice:
 
