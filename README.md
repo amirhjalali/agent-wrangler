@@ -142,6 +142,9 @@ Use this when you want a real operator grid similar to "team sessions":
 ./scripts/agent-wrangler program init
 ./scripts/agent-wrangler program team
 ./scripts/agent-wrangler program loops
+./scripts/agent-wrangler program phases --refresh-state
+./scripts/agent-wrangler program promote
+./scripts/agent-wrangler program complete
 ./scripts/agent-wrangler program status
 ./scripts/agent-wrangler program plan --write-report
 ./scripts/agent-wrangler program loop --iterations 1 --apply-safe --write-report
@@ -194,6 +197,7 @@ Notes:
 - `fleet popup` opens a live fleet manager view in a tmux popup for quick triage.
 - `program` gives a deep execution system with explicit team roles, loops, and readiness gates toward an impeccable product target.
 - `program daemon` runs unattended loops with automatic fleet repaint + optional guardrail enforcement.
+- `program phases/promote/complete` enforces phase-by-phase delivery using objective gates and readiness streaks.
 - You do not need to reset Ghostty first. Import into tmux, verify control, then close old tabs gradually.
 - `import` maps live Ghostty sessions to repos by process cwd/path and can carry detected agent type (`claude`/`codex`) when enabled.
 - `import` is safe by default: startup commands and agent relaunch are disabled unless you pass `--startup` and/or `--agent`.

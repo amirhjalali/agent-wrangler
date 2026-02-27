@@ -19,6 +19,8 @@ Examples:
   ./scripts/agent-wrangler up --rebuild --mode import --max-panes 10 --nav --manager --manager-replace
   ./scripts/agent-wrangler fleet manager --replace --update-defaults
   ./scripts/agent-wrangler drift --fleet --alert-dirty 25
+  ./scripts/agent-wrangler program phases --refresh-state
+  ./scripts/agent-wrangler program promote
   ./scripts/agent-wrangler program loop --iterations 1 --apply-safe --write-report
   ./scripts/agent-wrangler program daemon --apply-guardrails
 EOF

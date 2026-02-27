@@ -150,6 +150,10 @@ def default_program() -> dict[str, Any]:
             "last_run_at": None,
             "last_readiness_score": None,
             "last_stage": None,
+            "readiness_streak": 0,
+            "current_phase": 1,
+            "phase_statuses": [],
+            "history": [],
         },
     }
 
@@ -451,11 +455,120 @@ def build_actions(program: dict[str, Any], metrics: dict[str, Any], gates: list[
     return actions
 
 
-def persist_state(program: dict[str, Any], score: int, stage: str) -> None:
+def gate_map(gates: list[dict[str, Any]]) -> dict[str, bool]:
+    out: dict[str, bool] = {}
+    for item in gates:
+        key = str(item.get("id") or "")
+        if not key:
+            continue
+        out[key] = bool(item.get("pass"))
+    return out
+
+
+def readiness_streak(history: list[dict[str, Any]], target: int) -> int:
+    streak = 0
+    for item in reversed(history):
+        try:
+            score = int(item.get("score") or 0)
+        except Exception:
+            score = 0
+        if score >= target:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def evaluate_phases(program: dict[str, Any], metrics: dict[str, Any], gates: list[dict[str, Any]], streak: int) -> list[dict[str, Any]]:
+    gm = gate_map(gates)
+    totals = metrics.get("fleet_totals", {})
+    attention = int(totals.get("attention") or 0)
+    red = int(totals.get("red") or 0)
+    sessions = int(totals.get("sessions") or 0)
+    waiting = int(totals.get("waiting") or 0)
+    target_score = int(program.get("targets", {}).get("min_readiness_score", 92))
+    score_gate = bool(gm.get("readiness"))
+    hygiene_gate = bool(gm.get("repo-hygiene"))
+    loop_gate = bool(gm.get("loop-cadence"))
+    fleet_gate = bool(gm.get("fleet-control"))
+    runtime_gate = bool(gm.get("runtime-health"))
+
+    statuses: list[dict[str, Any]] = []
+    statuses.append(
+        {
+            "id": "phase-1",
+            "name": "Operational Hardening",
+            "pass": fleet_gate and runtime_gate and sessions > 0,
+            "detail": f"fleet={fleet_gate} runtime={runtime_gate} sessions={sessions}",
+        }
+    )
+    statuses.append(
+        {
+            "id": "phase-2",
+            "name": "Impeccable UX",
+            "pass": fleet_gate and runtime_gate and attention <= 2 and red <= 1 and waiting <= 3,
+            "detail": f"attention={attention} red={red} waiting={waiting}",
+        }
+    )
+    statuses.append(
+        {
+            "id": "phase-3",
+            "name": "Autonomous Loops",
+            "pass": loop_gate and metrics.get("manager_running") is True,
+            "detail": f"loop_cadence={loop_gate} manager_running={metrics.get('manager_running')}",
+        }
+    )
+    statuses.append(
+        {
+            "id": "phase-4",
+            "name": "Impeccable Product",
+            "pass": score_gate and hygiene_gate and streak >= 7,
+            "detail": f"score_gate={score_gate} hygiene={hygiene_gate} streak={streak}/7 target={target_score}",
+        }
+    )
+    return statuses
+
+
+def highest_contiguous_phase(statuses: list[dict[str, Any]]) -> int:
+    idx = 0
+    for offset, item in enumerate(statuses, start=1):
+        if bool(item.get("pass")):
+            idx = offset
+            continue
+        break
+    return idx
+
+
+def persist_state(program: dict[str, Any], score: int, stage: str, gates: list[dict[str, Any]], metrics: dict[str, Any]) -> None:
     state = program.setdefault("state", {})
     state["last_run_at"] = now_iso()
     state["last_readiness_score"] = score
     state["last_stage"] = stage
+
+    history = state.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+        state["history"] = history
+    history.append(
+        {
+            "at": now_iso(),
+            "score": score,
+            "stage": stage,
+            "gates": gate_map(gates),
+        }
+    )
+    if len(history) > 200:
+        del history[:-200]
+
+    target = int(program.get("targets", {}).get("min_readiness_score", 92))
+    streak = readiness_streak(history, target=target)
+    state["readiness_streak"] = streak
+
+    phase_statuses = evaluate_phases(program, metrics, gates, streak=streak)
+    state["phase_statuses"] = phase_statuses
+    reached = max(1, highest_contiguous_phase(phase_statuses))
+    current = int(state.get("current_phase") or 1)
+    state["current_phase"] = max(current, reached)
 
 
 def print_team(program: dict[str, Any]) -> int:
@@ -479,14 +592,24 @@ def print_loops(program: dict[str, Any]) -> int:
     return 0
 
 
-def print_status(program: dict[str, Any], metrics: dict[str, Any], score: int, stage: str, gates: list[dict[str, Any]]) -> None:
+def print_status(
+    program: dict[str, Any],
+    metrics: dict[str, Any],
+    score: int,
+    stage: str,
+    gates: list[dict[str, Any]],
+    *,
+    streak: int,
+    phase_statuses: list[dict[str, Any]],
+) -> None:
     totals = metrics.get("fleet_totals", {})
     print(f"[{metrics.get('generated_at')}] {program.get('program_name')}")
     print(f"Objective: {program.get('objective')}")
     print(
-        "Readiness: {score}/100 ({stage})  sessions={sessions} panes={panes} attention={attention} waiting={waiting} active={active}".format(
+        "Readiness: {score}/100 ({stage}) streak={streak}  sessions={sessions} panes={panes} attention={attention} waiting={waiting} active={active}".format(
             score=score,
             stage=stage,
+            streak=streak,
             sessions=totals.get("sessions", 0),
             panes=totals.get("panes", 0),
             attention=totals.get("attention", 0),
@@ -507,6 +630,12 @@ def print_status(program: dict[str, Any], metrics: dict[str, Any], score: int, s
     for gate in gates:
         state = "yes" if gate.get("pass") else "no"
         print(f"{str(gate.get('name') or '-'):<18} {state:<5} {str(gate.get('detail') or '-')}")
+
+    print("")
+    print(f"{'PHASE':<24} {'PASS':<5} DETAIL")
+    for item in phase_statuses:
+        state = "yes" if item.get("pass") else "no"
+        print(f"{str(item.get('name') or '-'):<24} {state:<5} {str(item.get('detail') or '-')}")
 
     high_drift = list(metrics.get("high_drift", []))
     if high_drift:
@@ -529,7 +658,9 @@ def markdown_report(
     metrics: dict[str, Any],
     score: int,
     stage: str,
+    streak: int,
     gates: list[dict[str, Any]],
+    phase_statuses: list[dict[str, Any]],
     actions: list[dict[str, Any]],
 ) -> str:
     totals = metrics.get("fleet_totals", {})
@@ -537,7 +668,7 @@ def markdown_report(
     lines.append(f"# {program.get('program_name')} Report")
     lines.append("")
     lines.append(f"- Generated: {metrics.get('generated_at')}")
-    lines.append(f"- Readiness: **{score}/100** ({stage})")
+    lines.append(f"- Readiness: **{score}/100** ({stage}), streak={streak}")
     lines.append(
         "- Fleet: sessions={sessions} panes={panes} attention={attention} waiting={waiting} active={active}".format(
             sessions=totals.get("sessions", 0),
@@ -560,6 +691,11 @@ def markdown_report(
     for gate in gates:
         mark = "PASS" if gate.get("pass") else "FAIL"
         lines.append(f"- [{mark}] {gate.get('name')}: {gate.get('detail')}")
+    lines.append("")
+    lines.append("## Phase Status")
+    for item in phase_statuses:
+        mark = "PASS" if item.get("pass") else "FAIL"
+        lines.append(f"- [{mark}] {item.get('name')}: {item.get('detail')}")
     lines.append("")
     lines.append("## Action Queue")
     for action in actions:
@@ -604,14 +740,116 @@ def run_loops(_: argparse.Namespace) -> int:
     return print_loops(load_program())
 
 
+def run_phases(args: argparse.Namespace) -> int:
+    program = load_program()
+    store = tmux_teams.load_store()
+    metrics = collect_signals(args, store)
+    score, stage = compute_readiness(program, metrics)
+    gates = build_gates(program, metrics, score)
+    state = program.get("state", {})
+    history = state.get("history", []) if isinstance(state.get("history"), list) else []
+    target = int(program.get("targets", {}).get("min_readiness_score", 92))
+    pre_streak = readiness_streak(history, target=target)
+    statuses = evaluate_phases(program, metrics, gates, streak=pre_streak)
+    contiguous = highest_contiguous_phase(statuses)
+
+    print(f"Current phase: {int(state.get('current_phase') or 1)}")
+    print(f"Contiguous phase readiness: {contiguous}")
+    print(f"Readiness score: {score} ({stage}) streak={pre_streak}")
+    print("")
+    print(f"{'PHASE':<8} {'NAME':<24} {'PASS':<5} DETAIL")
+    for idx, item in enumerate(statuses, start=1):
+        mark = "yes" if item.get("pass") else "no"
+        print(f"{idx:<8} {str(item.get('name') or '-'):<24} {mark:<5} {str(item.get('detail') or '-')}")
+
+    if args.refresh_state:
+        persist_state(program, score, stage, gates, metrics)
+        save_program(program)
+        print("")
+        print("State refreshed in config.")
+    return 0
+
+
+def run_promote(args: argparse.Namespace) -> int:
+    program = load_program()
+    store = tmux_teams.load_store()
+    metrics = collect_signals(args, store)
+    score, stage = compute_readiness(program, metrics)
+    gates = build_gates(program, metrics, score)
+    state = program.setdefault("state", {})
+    history = state.get("history", []) if isinstance(state.get("history"), list) else []
+    target = int(program.get("targets", {}).get("min_readiness_score", 92))
+    pre_streak = readiness_streak(history, target=target)
+    statuses = evaluate_phases(program, metrics, gates, streak=pre_streak)
+    contiguous = highest_contiguous_phase(statuses)
+    current = int(state.get("current_phase") or 1)
+    requested = int(args.phase) if args.phase else None
+
+    if requested is not None:
+        if requested < 1 or requested > 4:
+            raise ValueError("phase must be between 1 and 4")
+        if not args.force and requested > contiguous:
+            raise ValueError(
+                f"Cannot promote to phase {requested}: readiness only supports phase {contiguous}. Use --force to override."
+            )
+        state["current_phase"] = requested
+        persist_state(program, score, stage, gates, metrics)
+        save_program(program)
+        print(f"Set current phase to {requested}")
+        return 0
+
+    if contiguous > current:
+        state["current_phase"] = contiguous
+        persist_state(program, score, stage, gates, metrics)
+        save_program(program)
+        print(f"Promoted phase {current} -> {contiguous}")
+    else:
+        persist_state(program, score, stage, gates, metrics)
+        save_program(program)
+        print(f"No promotion. Current phase={current}, readiness supports phase={contiguous}.")
+    return 0
+
+
+def run_complete(args: argparse.Namespace) -> int:
+    program = load_program()
+    store = tmux_teams.load_store()
+    metrics = collect_signals(args, store)
+    score, stage = compute_readiness(program, metrics)
+    gates = build_gates(program, metrics, score)
+    state = program.get("state", {})
+    history = state.get("history", []) if isinstance(state.get("history"), list) else []
+    target = int(program.get("targets", {}).get("min_readiness_score", 92))
+    pre_streak = readiness_streak(history, target=target)
+    statuses = evaluate_phases(program, metrics, gates, streak=pre_streak)
+    contiguous = highest_contiguous_phase(statuses)
+    complete = contiguous >= 4 and all(bool(item.get("pass")) for item in statuses)
+
+    print(f"Impeccable completion: {'yes' if complete else 'no'}")
+    print(f"Contiguous phase readiness: {contiguous}/4")
+    print(f"Readiness score={score} stage={stage} streak={pre_streak}")
+    if complete:
+        print("All phases satisfied.")
+    else:
+        failing = [item for item in statuses if not item.get("pass")]
+        print("Blocking phases:")
+        for item in failing:
+            print(f"- {item.get('name')}: {item.get('detail')}")
+    return 0
+
+
 def run_status(args: argparse.Namespace) -> int:
     program = load_program()
     store = tmux_teams.load_store()
     metrics = collect_signals(args, store)
     score, stage = compute_readiness(program, metrics)
     gates = build_gates(program, metrics, score)
-    print_status(program, metrics, score, stage, gates)
-    persist_state(program, score, stage)
+    state = program.get("state", {})
+    history = state.get("history", []) if isinstance(state.get("history"), list) else []
+    target = int(program.get("targets", {}).get("min_readiness_score", 92))
+    pre_streak = readiness_streak(history, target=target)
+    phase_statuses = evaluate_phases(program, metrics, gates, streak=pre_streak)
+    print_status(program, metrics, score, stage, gates, streak=pre_streak, phase_statuses=phase_statuses)
+    persist_state(program, score, stage, gates, metrics)
     save_program(program)
     return 0
 
@@ -622,16 +860,21 @@ def run_plan(args: argparse.Namespace) -> int:
     metrics = collect_signals(args, store)
     score, stage = compute_readiness(program, metrics)
     gates = build_gates(program, metrics, score)
+    state = program.get("state", {})
+    history = state.get("history", []) if isinstance(state.get("history"), list) else []
+    target = int(program.get("targets", {}).get("min_readiness_score", 92))
+    pre_streak = readiness_streak(history, target=target)
+    phase_statuses = evaluate_phases(program, metrics, gates, streak=pre_streak)
     actions = build_actions(program, metrics, gates)
 
-    print_status(program, metrics, score, stage, gates)
+    print_status(program, metrics, score, stage, gates, streak=pre_streak, phase_statuses=phase_statuses)
     print("")
     print("Execution actions:")
     for action in actions:
         print(f"- {action.get('priority')} {action.get('owner')}: {action.get('title')}")
         print(f"  cmd: {action.get('command')}")
 
-    persist_state(program, score, stage)
+    persist_state(program, score, stage, gates, metrics)
     save_program(program)
 
     if args.write_report:
@@ -654,7 +897,9 @@ def run_plan(args: argparse.Namespace) -> int:
             metrics=metrics,
             score=score,
             stage=stage,
+            streak=pre_streak,
             gates=gates,
+            phase_statuses=phase_statuses,
             actions=actions,
         )
         json_path, md_path = write_report_files("program-plan", payload, md)
@@ -735,6 +980,11 @@ def run_loop(args: argparse.Namespace) -> int:
             metrics = collect_signals(args, store)
             score, stage = compute_readiness(program, metrics)
             gates = build_gates(program, metrics, score)
+            state = program.get("state", {})
+            history = state.get("history", []) if isinstance(state.get("history"), list) else []
+            target = int(program.get("targets", {}).get("min_readiness_score", 92))
+            pre_streak = readiness_streak(history, target=target)
+            phase_statuses = evaluate_phases(program, metrics, gates, streak=pre_streak)
             actions = build_actions(program, metrics, gates)
 
             apply_results: list[str] = []
@@ -742,7 +992,15 @@ def run_loop(args: argparse.Namespace) -> int:
             if args.apply_safe:
                 apply_results, guardrail_results = run_safe_apply(metrics, args)
 
-            print_status(program, metrics, score, stage, gates)
+            print_status(
+                program,
+                metrics,
+                score,
+                stage,
+                gates,
+                streak=pre_streak,
+                phase_statuses=phase_statuses,
+            )
             print("")
             print("Loop actions:")
             for action in actions[:8]:
@@ -767,7 +1025,7 @@ def run_loop(args: argparse.Namespace) -> int:
                         )
                     )
 
-            persist_state(program, score, stage)
+            persist_state(program, score, stage, gates, metrics)
             save_program(program)
 
             if args.write_report:
@@ -777,6 +1035,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     "readiness": {"score": score, "stage": stage},
                     "metrics": metrics,
                     "gates": gates,
+                    "phase_statuses": phase_statuses,
                     "actions": actions,
                     "apply_results": apply_results,
                     "guardrail_results": guardrail_results,
@@ -786,7 +1045,9 @@ def run_loop(args: argparse.Namespace) -> int:
                     metrics=metrics,
                     score=score,
                     stage=stage,
+                    streak=pre_streak,
                     gates=gates,
+                    phase_statuses=phase_statuses,
                     actions=actions,
                 )
                 json_path, md_path = write_report_files("program-loop", payload, md)
@@ -819,6 +1080,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     loops = sub.add_parser("loops", help="Show configured loops")
     loops.set_defaults(handler=run_loops)
+
+    phases = sub.add_parser("phases", help="Show phase-by-phase readiness status")
+    add_signal_args(phases)
+    phases.add_argument("--refresh-state", action="store_true", help="Persist the computed phase status to config")
+    phases.set_defaults(handler=run_phases)
+
+    promote = sub.add_parser("promote", help="Promote current phase based on readiness")
+    add_signal_args(promote)
+    promote.add_argument("--phase", type=int, help="Explicit phase number to set (1-4)")
+    promote.add_argument("--force", action="store_true", help="Allow manual promotion beyond readiness checks")
+    promote.set_defaults(handler=run_promote)
+
+    complete = sub.add_parser("complete", help="Check if all phases are fully satisfied")
+    add_signal_args(complete)
+    complete.set_defaults(handler=run_complete)
 
     status = sub.add_parser("status", help="Show current readiness gates and signals")
     add_signal_args(status)

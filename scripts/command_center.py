@@ -1768,6 +1768,10 @@ def run_palette(_: argparse.Namespace) -> int:
     print(f"18. {PRIMARY_CLI} program status")
     print(f"19. {PRIMARY_CLI} program plan --write-report")
     print(f"20. {PRIMARY_CLI} program loop --iterations 1 --apply-safe --write-report")
+    print(f"21. {PRIMARY_CLI} program daemon --apply-guardrails")
+    print(f"22. {PRIMARY_CLI} program phases --refresh-state")
+    print(f"23. {PRIMARY_CLI} program promote")
+    print(f"24. {PRIMARY_CLI} program complete")
     print("Legacy aliases still work: cc, hq, teams")
     return 0
 
