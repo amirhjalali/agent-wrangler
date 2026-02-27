@@ -20,6 +20,7 @@ Examples:
   ./scripts/agent-wrangler fleet manager --replace --update-defaults
   ./scripts/agent-wrangler drift --fleet --alert-dirty 25
   ./scripts/agent-wrangler program loop --iterations 1 --apply-safe --write-report
+  ./scripts/agent-wrangler program daemon --apply-guardrails
 EOF
   echo ""
   exec python3 "$SCRIPT_DIR/command_center.py" --help

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import terminal_sentinel
 import tmux_teams
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -663,7 +664,22 @@ def run_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def run_safe_apply(metrics: dict[str, Any]) -> list[str]:
+def apply_guardrails(
+    *,
+    max_ai_sessions: int,
+    wait_limit_minutes: int,
+    apply: bool,
+) -> list[dict[str, Any]]:
+    snapshot, _ = terminal_sentinel.classify_sessions(source_filter="ghostty", include_idle=False)
+    rec = terminal_sentinel.recommend_actions(
+        snapshot=snapshot,
+        max_ai_sessions=max_ai_sessions,
+        wait_limit_minutes=wait_limit_minutes,
+    )
+    return terminal_sentinel.apply_actions(rec, dry_run=(not apply))
+
+
+def run_safe_apply(metrics: dict[str, Any], args: argparse.Namespace) -> tuple[list[str], list[dict[str, Any]]]:
     actions: list[str] = []
     if not metrics.get("manager_running"):
         ns = argparse.Namespace(
@@ -683,7 +699,30 @@ def run_safe_apply(metrics: dict[str, Any]) -> list[str]:
         )
         tmux_teams.run_fleet_manager(ns)
         actions.append(f"started manager session {metrics.get('manager_session')}")
-    return actions
+
+    for session in list(metrics.get("sessions", [])):
+        if not tmux_teams.session_exists(str(session)):
+            continue
+        tmux_teams.refresh_pane_health(
+            session=str(session),
+            capture_lines=max(20, int(args.capture_lines)),
+            wait_attention_min=max(0, int(args.wait_attention_min)),
+            apply_colors=True,
+        )
+    actions.append("repainted fleet pane health styles")
+
+    guardrail_results = apply_guardrails(
+        max_ai_sessions=max(1, int(args.max_ai_sessions)),
+        wait_limit_minutes=max(1, int(args.kill_waiting_ai_after)),
+        apply=bool(args.apply_guardrails),
+    )
+    if guardrail_results:
+        mode = "APPLY" if args.apply_guardrails else "PLAN"
+        actions.append(f"guardrails {mode}: {len(guardrail_results)} action(s)")
+    else:
+        actions.append("guardrails: no actions")
+
+    return actions, guardrail_results
 
 
 def run_loop(args: argparse.Namespace) -> int:
@@ -699,8 +738,9 @@ def run_loop(args: argparse.Namespace) -> int:
             actions = build_actions(program, metrics, gates)
 
             apply_results: list[str] = []
+            guardrail_results: list[dict[str, Any]] = []
             if args.apply_safe:
-                apply_results = run_safe_apply(metrics)
+                apply_results, guardrail_results = run_safe_apply(metrics, args)
 
             print_status(program, metrics, score, stage, gates)
             print("")
@@ -712,6 +752,20 @@ def run_loop(args: argparse.Namespace) -> int:
                 print("Safe apply actions:")
                 for line in apply_results:
                     print(f"- {line}")
+            if guardrail_results:
+                print("")
+                print("Guardrail results:")
+                for item in guardrail_results[:10]:
+                    mode = "APPLY" if item.get("applied") else "PLAN"
+                    print(
+                        "- {mode} pid={pid} tty={tty} reason={reason} => {result}".format(
+                            mode=mode,
+                            pid=item.get("pid"),
+                            tty=item.get("tty"),
+                            reason=item.get("reason"),
+                            result=item.get("result"),
+                        )
+                    )
 
             persist_state(program, score, stage)
             save_program(program)
@@ -725,6 +779,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     "gates": gates,
                     "actions": actions,
                     "apply_results": apply_results,
+                    "guardrail_results": guardrail_results,
                 }
                 md = markdown_report(
                     program=program,
@@ -779,8 +834,42 @@ def build_parser() -> argparse.ArgumentParser:
     loop.add_argument("--interval", type=int, default=600, help="Loop interval in seconds")
     loop.add_argument("--iterations", type=int, default=1, help="0 means infinite")
     loop.add_argument("--apply-safe", action="store_true", help="Apply safe non-destructive remediations")
+    loop.add_argument("--max-ai-sessions", type=int, default=4, help="Guardrail max concurrent AI sessions")
+    loop.add_argument("--kill-waiting-ai-after", type=int, default=120, help="Guardrail wait threshold in minutes")
+    loop.add_argument(
+        "--apply-guardrails",
+        action="store_true",
+        help="Actually stop sessions selected by guardrails (default is dry-run plan)",
+    )
     loop.add_argument("--write-report", action="store_true", help="Write each loop iteration report")
     loop.set_defaults(handler=run_loop)
+
+    daemon = sub.add_parser("daemon", help="Run continuous loop with sane defaults for unattended operation")
+    add_signal_args(daemon)
+    daemon.add_argument("--interval", type=int, default=600)
+    daemon.add_argument("--apply-guardrails", action="store_true")
+    daemon.add_argument("--max-ai-sessions", type=int, default=4)
+    daemon.add_argument("--kill-waiting-ai-after", type=int, default=120)
+    daemon.add_argument("--write-report", action="store_true", default=True)
+    daemon.set_defaults(
+        handler=lambda a: run_loop(
+            argparse.Namespace(
+                sessions=a.sessions,
+                pattern=a.pattern,
+                include_manager=a.include_manager,
+                capture_lines=a.capture_lines,
+                wait_attention_min=a.wait_attention_min,
+                alert_dirty=a.alert_dirty,
+                interval=a.interval,
+                iterations=0,
+                apply_safe=True,
+                max_ai_sessions=a.max_ai_sessions,
+                kill_waiting_ai_after=a.kill_waiting_ai_after,
+                apply_guardrails=a.apply_guardrails,
+                write_report=True if getattr(a, "write_report", True) else False,
+            )
+        )
+    )
 
     return parser
 

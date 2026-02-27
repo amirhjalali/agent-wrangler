@@ -145,6 +145,8 @@ Use this when you want a real operator grid similar to "team sessions":
 ./scripts/agent-wrangler program status
 ./scripts/agent-wrangler program plan --write-report
 ./scripts/agent-wrangler program loop --iterations 1 --apply-safe --write-report
+./scripts/agent-wrangler program daemon --apply-guardrails
+./scripts/program-daemon.sh --apply-guardrails
 
 # Fast pane navigation without tmux prefix
 ./scripts/agent-wrangler nav
@@ -191,6 +193,7 @@ Notes:
 - `fleet jump` opens a fast choose-tree jump flow (inside tmux) or direct session focus.
 - `fleet popup` opens a live fleet manager view in a tmux popup for quick triage.
 - `program` gives a deep execution system with explicit team roles, loops, and readiness gates toward an impeccable product target.
+- `program daemon` runs unattended loops with automatic fleet repaint + optional guardrail enforcement.
 - You do not need to reset Ghostty first. Import into tmux, verify control, then close old tabs gradually.
 - `import` maps live Ghostty sessions to repos by process cwd/path and can carry detected agent type (`claude`/`codex`) when enabled.
 - `import` is safe by default: startup commands and agent relaunch are disabled unless you pass `--startup` and/or `--agent`.
@@ -263,6 +266,7 @@ Best practice:
 - `scripts/cc`: legacy wrapper for `command_center.py`.
 - `scripts/tmux_teams.py`: tmux team-grid orchestrator used by `agent-wrangler`/`cc teams`.
 - `scripts/program_orchestrator.py`: impeccable-product program engine (team, loops, gates, reports).
+- `scripts/program-daemon.sh`: unattended daemon wrapper for continual program loops.
 - `scripts/teams`: direct wrapper for `tmux_teams.py`.
 - `scripts/terminal_sentinel.py`: session classification for Ghostty terminals (`active`/`waiting`/`idle`).
 - `scripts/termwatch`: wrapper for `terminal_sentinel.py`.
