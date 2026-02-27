@@ -1591,6 +1591,81 @@ def run_fleet_focus(args: argparse.Namespace) -> int:
     return attach_session(target)
 
 
+def run_fleet_jump(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    sessions = resolve_fleet_sessions(
+        store=store,
+        explicit_csv=args.sessions,
+        pattern=args.pattern,
+        include_manager=args.include_manager,
+    )
+    if not sessions:
+        print("No sessions available for jump.")
+        return 0
+
+    if args.session_name:
+        target = args.session_name.strip()
+        if target not in sessions:
+            known = ", ".join(sessions)
+            raise ValueError(f"Session '{target}' is not in current fleet set. Known: {known}")
+        return run_fleet_focus(argparse.Namespace(session_name=target))
+
+    if os.environ.get("TMUX"):
+        # Native tmux picker for fastest in-client jump navigation.
+        code, _, err = tmux(["choose-tree", "-Zw"], timeout=20)
+        if code != 0:
+            raise ValueError(err.strip() or "failed to open tmux choose-tree")
+        return 0
+
+    print("Jump picker is best inside tmux.")
+    print("Use one of:")
+    for session in sessions:
+        print(f"- agent-wrangler fleet jump --session-name {session}")
+    return 0
+
+
+def run_fleet_popup(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    if not os.environ.get("TMUX"):
+        print("fleet popup requires running inside an attached tmux client.")
+        print("Fallback: agent-wrangler fleet manager --replace")
+        return 0
+
+    script = Path(__file__).resolve()
+    watch_cmd = (
+        f"python3 {shlex.quote(str(script))} teams fleet watch "
+        f"--interval {max(1, int(args.interval))} "
+        f"--capture-lines {max(20, int(args.capture_lines))} "
+        f"--wait-attention-min {max(0, int(args.wait_attention_min))}"
+    )
+    if args.sessions:
+        watch_cmd += f" --sessions {shlex.quote(args.sessions)}"
+    if args.pattern:
+        watch_cmd += f" --pattern {shlex.quote(args.pattern)}"
+    if args.include_manager:
+        watch_cmd += " --include-manager"
+    if args.no_colorize:
+        watch_cmd += " --no-colorize"
+
+    popup_cmd = "zsh -lc " + shlex.quote(watch_cmd)
+    code, _, err = tmux(
+        [
+            "display-popup",
+            "-E",
+            "-w",
+            str(max(80, int(args.width))),
+            "-h",
+            str(max(18, int(args.height))),
+            popup_cmd,
+        ],
+        timeout=20,
+    )
+    if code != 0:
+        raise ValueError(err.strip() or "failed to open fleet popup")
+    return 0
+
+
 def run_drift(args: argparse.Namespace) -> int:
     ensure_tmux()
     store = load_store()
@@ -2065,6 +2140,25 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     fleet_focus = fleet_sub.add_parser("focus", help="Switch/attach to a target tmux session")
     fleet_focus.add_argument("session_name")
     fleet_focus.set_defaults(handler=run_fleet_focus)
+
+    fleet_jump = fleet_sub.add_parser("jump", help="Fast jump between sessions (choose-tree inside tmux)")
+    fleet_jump.add_argument("--session-name", help="Jump directly to a specific session")
+    fleet_jump.add_argument("--sessions", help="Comma-separated session override")
+    fleet_jump.add_argument("--pattern", help="Filter sessions by substring")
+    fleet_jump.add_argument("--include-manager", action="store_true")
+    fleet_jump.set_defaults(handler=run_fleet_jump)
+
+    fleet_popup = fleet_sub.add_parser("popup", help="Open fleet watch in a tmux popup")
+    fleet_popup.add_argument("--sessions", help="Comma-separated session override")
+    fleet_popup.add_argument("--pattern", help="Filter sessions by substring")
+    fleet_popup.add_argument("--include-manager", action="store_true")
+    fleet_popup.add_argument("--capture-lines", type=int, default=80)
+    fleet_popup.add_argument("--wait-attention-min", type=int, default=1)
+    fleet_popup.add_argument("--interval", type=int, default=3)
+    fleet_popup.add_argument("--width", type=int, default=220, help="Popup width (cells)")
+    fleet_popup.add_argument("--height", type=int, default=50, help="Popup height (cells)")
+    fleet_popup.add_argument("--no-colorize", action="store_true")
+    fleet_popup.set_defaults(handler=run_fleet_popup)
 
 
 def main() -> int:

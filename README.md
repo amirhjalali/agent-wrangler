@@ -131,6 +131,8 @@ Use this when you want a real operator grid similar to "team sessions":
 ./scripts/agent-wrangler fleet watch --interval 3
 ./scripts/agent-wrangler fleet manager --replace --update-defaults
 ./scripts/agent-wrangler fleet focus amir-grid
+./scripts/agent-wrangler fleet jump
+./scripts/agent-wrangler fleet popup
 
 # Repo drift view (AOE-style diff/dirty awareness)
 ./scripts/agent-wrangler drift
@@ -186,6 +188,8 @@ Notes:
 - `fleet manager` creates a dedicated HQ tmux session that monitors all managed sessions in real time.
 - `fleet set` lets you pin exactly which tmux sessions count as your operating universe.
 - `drift --fleet` gives a fast per-project branch/dirty summary across active sessions.
+- `fleet jump` opens a fast choose-tree jump flow (inside tmux) or direct session focus.
+- `fleet popup` opens a live fleet manager view in a tmux popup for quick triage.
 - `program` gives a deep execution system with explicit team roles, loops, and readiness gates toward an impeccable product target.
 - You do not need to reset Ghostty first. Import into tmux, verify control, then close old tabs gradually.
 - `import` maps live Ghostty sessions to repos by process cwd/path and can carry detected agent type (`claude`/`codex`) when enabled.
