@@ -781,6 +781,7 @@ def create_grid_session(
     layout: str | None,
     project_ids: list[str],
     proj_map: dict[str, dict[str, Any]],
+    project_overrides: dict[str, dict[str, Any]] | None,
     no_startup: bool,
     agent_default: str | None,
     agent_by_project: dict[str, str] | None,
@@ -797,7 +798,11 @@ def create_grid_session(
     if not project_ids:
         raise ValueError("No projects to create panes for.")
 
-    first = proj_map[project_ids[0]]
+    merged_map = dict(proj_map)
+    if project_overrides:
+        merged_map.update(project_overrides)
+
+    first = merged_map.get(project_ids[0], {})
     first_path = str(first.get("path") or "")
     if not first_path:
         raise ValueError(f"Project '{project_ids[0]}' has no path")
@@ -810,8 +815,10 @@ def create_grid_session(
         raise ValueError(err.strip() or f"failed to create session '{session}'")
 
     for project_id in project_ids[1:]:
-        project = proj_map[project_id]
+        project = merged_map.get(project_id, {})
         path = str(project.get("path") or "")
+        if not path:
+            raise ValueError(f"Project '{project_id}' has no path")
         split_for_path(session, path)
         # Rebalance as the grid grows to prevent "no space for new pane" on repeated splits.
         apply_layout(session, "tiled")
@@ -822,7 +829,7 @@ def create_grid_session(
     panes = list_panes(session)
     for idx, pane in enumerate(panes):
         project_id = project_ids[idx] if idx < len(project_ids) else f"pane-{idx}"
-        project = proj_map.get(project_id, {})
+        project = merged_map.get(project_id, {})
 
         pane_set_project_id(pane.pane_id, project_id)
         code, _, err = tmux(["select-pane", "-t", pane.pane_id, "-T", project_id], timeout=5)
@@ -853,7 +860,8 @@ def ghostty_import_plan(
     proj_map: dict[str, dict[str, Any]],
     max_panes: int,
     include_idle: bool,
-) -> tuple[list[str], dict[str, str], list[dict[str, Any]], list[dict[str, Any]]]:
+    preserve_duplicates: bool,
+) -> tuple[list[str], dict[str, str], dict[str, dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     snapshot, _ = terminal_sentinel.classify_sessions(source_filter="ghostty", include_idle=include_idle)
     sessions = list(snapshot.get("sessions", []))
     sessions.sort(
@@ -865,6 +873,8 @@ def ghostty_import_plan(
 
     project_ids: list[str] = []
     agent_by_project: dict[str, str] = {}
+    project_overrides: dict[str, dict[str, Any]] = {}
+    duplicate_counts: dict[str, int] = {}
     mapped: list[dict[str, Any]] = []
     unmatched: list[dict[str, Any]] = []
 
@@ -883,18 +893,30 @@ def ghostty_import_plan(
             )
             continue
 
-        if project_id not in project_ids:
+        mapped_project_id = project_id
+        if preserve_duplicates:
             if len(project_ids) >= max(1, max_panes):
                 continue
-            project_ids.append(project_id)
+            seen = duplicate_counts.get(project_id, 0) + 1
+            duplicate_counts[project_id] = seen
+            if seen > 1:
+                mapped_project_id = f"{project_id}__dup{seen}"
+                project_overrides[mapped_project_id] = dict(proj_map.get(project_id, {}))
+            project_ids.append(mapped_project_id)
+        else:
+            if project_id not in project_ids:
+                if len(project_ids) >= max(1, max_panes):
+                    continue
+                project_ids.append(project_id)
 
         agent = str(session.get("agent") or "").strip().lower()
-        if agent in {"claude", "codex", "aider", "gemini"} and project_id not in agent_by_project:
-            agent_by_project[project_id] = agent
+        if agent in {"claude", "codex", "aider", "gemini"} and mapped_project_id not in agent_by_project:
+            agent_by_project[mapped_project_id] = agent
 
         mapped.append(
             {
                 "project_id": project_id,
+                "mapped_project_id": mapped_project_id,
                 "tty": session.get("tty"),
                 "pid": session.get("pid"),
                 "status": session.get("status"),
@@ -904,7 +926,7 @@ def ghostty_import_plan(
             }
         )
 
-    return project_ids, agent_by_project, mapped, unmatched
+    return project_ids, agent_by_project, project_overrides, mapped, unmatched
 
 
 def run_bootstrap(args: argparse.Namespace) -> int:
@@ -922,6 +944,7 @@ def run_bootstrap(args: argparse.Namespace) -> int:
         layout=layout,
         project_ids=project_ids,
         proj_map=proj_map,
+        project_overrides=None,
         no_startup=args.no_startup,
         agent_default=args.agent,
         agent_by_project=None,
@@ -953,10 +976,11 @@ def run_import(args: argparse.Namespace) -> int:
     run_startup = bool(args.startup) and (not bool(args.no_startup))
     run_agents = bool(args.agent) and (not bool(args.no_agent))
 
-    project_ids, agent_by_project, mapped, unmatched = ghostty_import_plan(
+    project_ids, agent_by_project, project_overrides, mapped, unmatched = ghostty_import_plan(
         proj_map=proj_map,
         max_panes=args.max_panes,
         include_idle=args.include_idle,
+        preserve_duplicates=args.preserve_duplicates,
     )
     if not project_ids:
         raise ValueError("No Ghostty sessions matched known project paths. Keep current setup or pass explicit projects.")
@@ -967,6 +991,7 @@ def run_import(args: argparse.Namespace) -> int:
         print(f"Session: {session}")
         print(f"Panes: {len(project_ids)}  Layout: {resolved_layout}")
         print("Projects: " + ", ".join(project_ids))
+        print(f"Preserve duplicates: {'yes' if args.preserve_duplicates else 'no'}")
         print(f"Will run startup commands: {'yes' if run_startup else 'no'}")
         print(f"Will launch detected agents: {'yes' if run_agents else 'no'}")
         if run_agents and agent_by_project:
@@ -982,6 +1007,7 @@ def run_import(args: argparse.Namespace) -> int:
         layout=layout,
         project_ids=project_ids,
         proj_map=proj_map,
+        project_overrides=project_overrides,
         no_startup=(not run_startup),
         agent_default=None,
         agent_by_project=(agent_by_project if run_agents else None),
@@ -996,6 +1022,7 @@ def run_import(args: argparse.Namespace) -> int:
     print(f"Imported Ghostty sessions into tmux grid '{session}'")
     print(f"Panes: {len(project_ids)}  Layout: {resolved_layout}")
     print("Projects: " + ", ".join(project_ids))
+    print(f"Preserve duplicates: {'enabled' if args.preserve_duplicates else 'disabled'}")
     print(f"Startup commands: {'enabled' if run_startup else 'disabled'}")
     print(f"Detected agents: {'enabled' if run_agents else 'disabled'}")
     if run_agents and agent_by_project:
@@ -1006,11 +1033,16 @@ def run_import(args: argparse.Namespace) -> int:
     print("")
     print("Mapped sessions:")
     for item in mapped[: max(1, args.max_panes)]:
+        mapped_project_id = item.get("mapped_project_id") or item.get("project_id") or "-"
+        mapped_text = (
+            f"{item.get('project_id', '-')}" if mapped_project_id == item.get("project_id") else
+            f"{item.get('project_id', '-')} -> {mapped_project_id}"
+        )
         print(
-            "- tty={tty} status={status} project={project_id} agent={agent} cwd={cwd}".format(
+            "- tty={tty} status={status} project={project} agent={agent} cwd={cwd}".format(
                 tty=item.get("tty", "-"),
                 status=item.get("status", "-"),
-                project_id=item.get("project_id", "-"),
+                project=mapped_text,
                 agent=item.get("agent", "-"),
                 cwd=item.get("cwd") or "-",
             )
@@ -1046,11 +1078,13 @@ def run_up(args: argparse.Namespace) -> int:
         if args.mode == "bootstrap":
             project_ids = choose_projects(args.projects, limit=args.max_panes, group=args.group)
             agent_by_project = None
+            project_overrides = None
         else:
-            project_ids, detected_agents, mapped, unmatched = ghostty_import_plan(
+            project_ids, detected_agents, project_overrides, mapped, unmatched = ghostty_import_plan(
                 proj_map=proj_map,
                 max_panes=args.max_panes,
                 include_idle=args.include_idle,
+                preserve_duplicates=args.preserve_duplicates,
             )
             agent_by_project = detected_agents if run_agents else None
 
@@ -1058,6 +1092,7 @@ def run_up(args: argparse.Namespace) -> int:
                 if args.projects or args.group:
                     project_ids = choose_projects(args.projects, limit=args.max_panes, group=args.group)
                     agent_by_project = None
+                    project_overrides = None
                     print("No Ghostty matches found; using configured project selection fallback.")
                 else:
                     raise ValueError(
@@ -1071,6 +1106,7 @@ def run_up(args: argparse.Namespace) -> int:
             layout=layout,
             project_ids=project_ids,
             proj_map=proj_map,
+            project_overrides=project_overrides,
             no_startup=(not run_startup),
             agent_default=None,
             agent_by_project=agent_by_project,
@@ -1191,7 +1227,10 @@ def run_watch(args: argparse.Namespace) -> int:
                 )
 
             print("")
-            print("Navigation: Ctrl-b + arrows | Ctrl-b + o next pane | Ctrl-b + q show pane numbers")
+            print(
+                "Navigation: Option+Arrow panes | Option+[ / Option+] windows | Option+1..9 window jump "
+                "(fallback: Ctrl-b + arrows)"
+            )
             print(
                 "Control: agent-wrangler agent <project> claude|codex | "
                 "agent-wrangler stop <project> | agent-wrangler shell <project>"
@@ -1937,6 +1976,11 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     up.add_argument("--projects", help="Comma-separated project ids (used for bootstrap or fallback)")
     up.add_argument("--group", choices=["business", "personal"], help="Project group for bootstrap/fallback")
     up.add_argument("--include-idle", action="store_true", help="Include idle Ghostty sessions when importing")
+    up.add_argument(
+        "--preserve-duplicates",
+        action="store_true",
+        help="Keep one pane per matched Ghostty session, even when multiple sessions map to the same project",
+    )
     up.add_argument("--startup", action="store_true", help="Run startup commands in panes")
     up.add_argument("--agent", action="store_true", help="Launch detected agents in panes")
     up.add_argument("--no-startup", action="store_true")
@@ -1971,6 +2015,11 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     imp.add_argument("--layout", choices=LAYOUT_CHOICES, default=None)
     imp.add_argument("--max-panes", type=int, default=10, help="Max panes to import from Ghostty")
     imp.add_argument("--include-idle", action="store_true", help="Include idle Ghostty sessions when mapping")
+    imp.add_argument(
+        "--preserve-duplicates",
+        action="store_true",
+        help="Keep one pane per matched Ghostty session, even when multiple sessions map to the same project",
+    )
     imp.add_argument("--startup", action="store_true", help="Run project startup commands in imported panes")
     imp.add_argument("--agent", action="store_true", help="Start detected agent tools in imported panes")
     imp.add_argument("--no-startup", action="store_true", help="Do not run per-project startup commands")

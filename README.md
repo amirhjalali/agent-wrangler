@@ -21,7 +21,7 @@ brew install tmux
 Preview first:
 
 ```bash
-./scripts/agent-wrangler import --dry-run --max-panes 10 --layout auto
+./scripts/agent-wrangler import --dry-run --max-panes 10 --layout auto --preserve-duplicates
 ```
 
 Create full grid + manager + nav + detected agents in one command:
@@ -189,11 +189,11 @@ Use this when you want a real operator grid similar to "team sessions":
 ```bash
 # Simplest launcher (one command)
 ./scripts/agent-wrangler start
-./scripts/hq --rebuild --mode import --max-panes 10
-./scripts/hq --rebuild --mode import --max-panes 10 --nav --manager --manager-replace
+./scripts/hq --rebuild --mode import --preserve-duplicates --max-panes 10
+./scripts/hq --rebuild --mode import --preserve-duplicates --max-panes 10 --nav --manager --manager-replace
 
 # Single command entrypoint (recommended)
-./scripts/agent-wrangler up --rebuild --mode import --max-panes 10
+./scripts/agent-wrangler up --rebuild --mode import --preserve-duplicates --max-panes 10
 
 # Manager/orchestrator screen + health coloring
 ./scripts/agent-wrangler manager --replace
@@ -231,11 +231,11 @@ Use this when you want a real operator grid similar to "team sessions":
 ./scripts/agent-wrangler nav
 
 # Import your current Ghostty sessions into a dynamic tmux grid (recommended first move)
-./scripts/agent-wrangler import --max-panes 10 --layout auto
-./scripts/agent-wrangler import --dry-run --max-panes 10 --layout auto
+./scripts/agent-wrangler import --max-panes 10 --layout auto --preserve-duplicates
+./scripts/agent-wrangler import --dry-run --max-panes 10 --layout auto --preserve-duplicates
 
 # Optional: also run startup commands and re-open detected agents
-./scripts/agent-wrangler import --max-panes 10 --layout auto --startup --agent
+./scripts/agent-wrangler import --max-panes 10 --layout auto --preserve-duplicates --startup --agent
 
 # Build a 4-pane tmux grid from selected repos
 ./scripts/agent-wrangler bootstrap --projects creator-studio,gabooja-agents,agentcy,argumend --layout tiled
@@ -267,6 +267,7 @@ Notes:
 - `hq` is a thin shortcut for `agent-wrangler up`.
 - `cc` and `teams` are still available as legacy aliases.
 - `agent-wrangler start` is the default startup command: Ghostty import + startup commands + detected agents + nav + manager.
+- `start` and `up --mode import` can preserve duplicate project sessions (`--preserve-duplicates`) so multiple Ghostty tabs in one repo stay as separate panes.
 - `fleet manager` creates a dedicated HQ tmux session that monitors all managed sessions in real time.
 - `fleet set` lets you pin exactly which tmux sessions count as your operating universe.
 - `drift --fleet` gives a fast per-project branch/dirty summary across active sessions.
