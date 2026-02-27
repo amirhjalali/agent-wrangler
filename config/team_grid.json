@@ -1,0 +1,23 @@
+{
+  "default_session": "amir-grid",
+  "default_layout": "tiled",
+  "default_projects": [
+    "gabooja-knowledge-base",
+    "creator-studio",
+    "amirhjalali-com",
+    "content-studio",
+    "gabooja-agents",
+    "gabooja-research",
+    "agentcy",
+    "campalborz",
+    "argumend"
+  ],
+  "fleet": {
+    "managed_sessions": [
+      "amir-grid"
+    ],
+    "manager_session": "wrangler-hq",
+    "manager_window": "fleet"
+  },
+  "updated_at": "2026-02-27T04:53:31+00:00"
+}

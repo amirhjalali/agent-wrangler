@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Agent Wrangler shortcuts:
+  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|drift
+    -> routed to: teams <command>
+  fleet ...
+    -> routed to: teams fleet ...
+  program ...
+    -> routed to: program_orchestrator.py
+  overview
+    -> routed to: ui
+
+Examples:
+  ./scripts/agent-wrangler up --rebuild --mode import --max-panes 10 --nav --manager --manager-replace
+  ./scripts/agent-wrangler fleet manager --replace --update-defaults
+  ./scripts/agent-wrangler drift --fleet --alert-dirty 25
+  ./scripts/agent-wrangler program loop --iterations 1 --apply-safe --write-report
+EOF
+  echo ""
+  exec python3 "$SCRIPT_DIR/command_center.py" --help
+fi
+
+case "${1:-}" in
+  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|drift)
+    set -- teams "$@"
+    ;;
+  fleet)
+    set -- teams "$@"
+    ;;
+  program)
+    shift
+    exec python3 "$SCRIPT_DIR/program_orchestrator.py" "$@"
+    ;;
+  overview)
+    shift
+    set -- ui "$@"
+    ;;
+esac
+
+exec python3 "$SCRIPT_DIR/command_center.py" "$@"

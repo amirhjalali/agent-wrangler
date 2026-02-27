@@ -1,0 +1,123 @@
+{
+  "version": "1.0",
+  "program_name": "Agent Wrangler Impeccable Program",
+  "objective": "Ship an impeccable multi-session agent command center for daily and overnight operations.",
+  "targets": {
+    "min_readiness_score": 92,
+    "max_attention": 1,
+    "max_high_drift_projects": 1,
+    "max_dirty_files": 120
+  },
+  "team": [
+    {
+      "id": "wrangler-chief",
+      "title": "Program Orchestrator",
+      "mission": "Own roadmap, gating, and execution sequencing across all agent teams.",
+      "kpi": "Readiness score >= 92 for 7 consecutive days."
+    },
+    {
+      "id": "fleet-warden",
+      "title": "Runtime Reliability",
+      "mission": "Keep fleet manager healthy and attention queue under strict control.",
+      "kpi": "Attention count <= 1 and red panes <= 1."
+    },
+    {
+      "id": "repo-sheriff",
+      "title": "Repo Hygiene",
+      "mission": "Prevent drift and dirty-tree entropy across active projects.",
+      "kpi": "High-drift projects <= 1 and dirty files <= 120."
+    },
+    {
+      "id": "ux-rider",
+      "title": "Operator Experience",
+      "mission": "Reduce command friction and improve response speed in manager views.",
+      "kpi": "Primary flows completed in <= 2 commands."
+    },
+    {
+      "id": "qa-gunslinger",
+      "title": "Quality and Safety",
+      "mission": "Harden error handling and guardrails for long unattended runs.",
+      "kpi": "No critical regressions from command upgrades."
+    },
+    {
+      "id": "automation-rancher",
+      "title": "Loop Automation",
+      "mission": "Turn manual checks into repeatable program loops and reports.",
+      "kpi": "All loop reports generated on cadence with clear next actions."
+    }
+  ],
+  "loops": [
+    {
+      "id": "fleet-heartbeat",
+      "owner": "fleet-warden",
+      "cadence": "every 3 minutes",
+      "goal": "Detect attention spikes and session health regressions quickly.",
+      "entry_command": "agent-wrangler fleet watch --interval 3"
+    },
+    {
+      "id": "drift-sweep",
+      "owner": "repo-sheriff",
+      "cadence": "every 30 minutes",
+      "goal": "Keep dirty-tree growth bounded and visible.",
+      "entry_command": "agent-wrangler drift --fleet --alert-dirty 25"
+    },
+    {
+      "id": "hardening-loop",
+      "owner": "qa-gunslinger",
+      "cadence": "every 2 hours",
+      "goal": "Fix top failure mode from current signals and close with validation.",
+      "entry_command": "agent-wrangler program plan --write-report"
+    },
+    {
+      "id": "delivery-loop",
+      "owner": "wrangler-chief",
+      "cadence": "daily",
+      "goal": "Promote readiness gates and ship one measurable improvement.",
+      "entry_command": "agent-wrangler program loop --iterations 1 --apply-safe --write-report"
+    }
+  ],
+  "phases": [
+    {
+      "id": "phase-1",
+      "name": "Operational Hardening",
+      "definition_of_done": [
+        "fleet manager runs reliably for full workday",
+        "attention queue remains <= 1 for most cycles",
+        "no blocking pane-creation/layout regressions"
+      ]
+    },
+    {
+      "id": "phase-2",
+      "name": "Impeccable UX",
+      "definition_of_done": [
+        "primary flows fit in 1-2 commands",
+        "fleet and drift outputs are readable at a glance",
+        "operator can jump to any session quickly"
+      ]
+    },
+    {
+      "id": "phase-3",
+      "name": "Autonomous Loops",
+      "definition_of_done": [
+        "program loop emits actionable report each run",
+        "safe auto-remediations reduce manual interventions",
+        "overnight behavior is bounded and observable"
+      ]
+    },
+    {
+      "id": "phase-4",
+      "name": "Impeccable Product",
+      "definition_of_done": [
+        "readiness score >= 92 for 7 consecutive days",
+        "high drift remains <= 1 project",
+        "fleet attention remains <= 1 without constant manual babysitting"
+      ]
+    }
+  ],
+  "state": {
+    "created_at": "2026-02-27T05:46:27+00:00",
+    "last_run_at": "2026-02-27T05:46:55+00:00",
+    "last_readiness_score": 17,
+    "last_stage": "unstable"
+  }
+}

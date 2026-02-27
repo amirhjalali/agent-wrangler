@@ -1,0 +1,140 @@
+{
+  "owner": "Amir Jalali",
+  "timezone": "America/New_York",
+  "linear_workspaces": [
+    {
+      "name": "gabooja",
+      "api_key_env": "LINEAR_API_KEY_GABOOJA"
+    },
+    {
+      "name": "amirhjalali",
+      "api_key_env": "LINEAR_API_KEY_AMIRHJALALI"
+    }
+  ],
+  "groups": {
+    "business": {
+      "max_active": 3
+    },
+    "personal": {
+      "max_active": 2
+    }
+  },
+  "projects": [
+    {
+      "id": "creator-studio",
+      "name": "Creator Studio",
+      "group": "business",
+      "path": "/Users/amirjalali/creator-studio",
+      "default_branch": "main",
+      "startup_command": "pnpm run dev",
+      "notes": "High-churn monorepo. Keep this as one dedicated context."
+    },
+    {
+      "id": "gabooja-agents",
+      "name": "Gabooja Agents",
+      "group": "business",
+      "path": "/Users/amirjalali/gabooja-agents",
+      "default_branch": "main",
+      "startup_command": "cd linear-agent && npm run conductor",
+      "notes": "Linear agent + conductor stack."
+    },
+    {
+      "id": "gabooja-website",
+      "name": "Gabooja Website",
+      "group": "business",
+      "path": "/Users/amirjalali/gabooja-website",
+      "default_branch": "main",
+      "startup_command": "npm run dev"
+    },
+    {
+      "id": "gabooja-api-research",
+      "name": "Gabooja API Research",
+      "group": "business",
+      "path": "/Users/amirjalali/gabooja-api-research",
+      "default_branch": "main",
+      "startup_command": "docker compose up"
+    },
+    {
+      "id": "gabooja-research",
+      "name": "Gabooja Research",
+      "group": "business",
+      "path": "/Users/amirjalali/gabooja-research",
+      "default_branch": "main",
+      "startup_command": "python3 -m venv .venv && source .venv/bin/activate"
+    },
+    {
+      "id": "gabooja-knowledge-base",
+      "name": "Gabooja Knowledge Base",
+      "group": "business",
+      "path": "/Users/amirjalali/gabooja-knowledge-base",
+      "default_branch": "main",
+      "startup_command": "code .",
+      "notes": "Documentation and management reporting data source."
+    },
+    {
+      "id": "agentcy",
+      "name": "Agentcy",
+      "group": "business",
+      "path": "/Users/amirjalali/agentcy",
+      "default_branch": "main",
+      "startup_command": "npm run build && npm run server",
+      "notes": "Platform-level orchestration framework."
+    },
+    {
+      "id": "content-studio",
+      "name": "Content Studio",
+      "group": "business",
+      "path": "/Users/amirjalali/content-studio",
+      "default_branch": "main",
+      "startup_command": "pnpm dev"
+    },
+    {
+      "id": "argumend",
+      "name": "Argumend",
+      "group": "personal",
+      "path": "/Users/amirjalali/argumend",
+      "default_branch": "main",
+      "startup_command": "npm run dev"
+    },
+    {
+      "id": "amirhjalali-site",
+      "name": "Amirhjalali Site",
+      "group": "personal",
+      "path": "/Users/amirjalali/amirhjalali",
+      "default_branch": "main",
+      "startup_command": "npm run dev"
+    },
+    {
+      "id": "campalborz",
+      "name": "Camp Alborz",
+      "group": "personal",
+      "path": "/Users/amirjalali/campalborz.org",
+      "default_branch": "main",
+      "startup_command": "pnpm dev"
+    },
+    {
+      "id": "amirhjalali-com",
+      "name": "Amirhjalali.com",
+      "group": "personal",
+      "path": "/Users/amirjalali/amirhjalali.com",
+      "default_branch": "main",
+      "startup_command": "npm run dev"
+    },
+    {
+      "id": "radrealty",
+      "name": "RadRealty",
+      "group": "personal",
+      "path": "/Users/amirjalali/radrealty.ca",
+      "default_branch": "main",
+      "startup_command": "npm run dev"
+    },
+    {
+      "id": "moltbook-mcp",
+      "name": "Moltbook MCP",
+      "group": "personal",
+      "path": "/Users/amirjalali/moltbook-mcp",
+      "default_branch": "main",
+      "startup_command": "npm start"
+    }
+  ]
+}

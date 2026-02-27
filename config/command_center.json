@@ -1,0 +1,46 @@
+{
+  "version": "1.0",
+  "next_card_number": 2,
+  "settings": {
+    "lanes": {
+      "now_max": 3,
+      "next_max": 6
+    },
+    "antfarm": {
+      "source": "ghostty",
+      "max_ai_sessions": 4,
+      "kill_waiting_ai_after_min": 120,
+      "overnight_interval_sec": 300
+    }
+  },
+  "cards": [
+    {
+      "id": "GAS-001",
+      "title": "Stabilize command center rollout",
+      "repo": "agentcy",
+      "lane": "now",
+      "status": "open",
+      "depends_on": [],
+      "steps": [
+        {
+          "id": 1,
+          "text": "Review active waiting sessions",
+          "done": false
+        },
+        {
+          "id": 2,
+          "text": "Set overnight guard thresholds",
+          "done": false
+        },
+        {
+          "id": 3,
+          "text": "Finalize daily operating loop",
+          "done": false
+        }
+      ],
+      "notes": "",
+      "created_at": "2026-02-26T01:09:18+00:00",
+      "updated_at": "2026-02-26T01:09:18+00:00"
+    }
+  ]
+}
