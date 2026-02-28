@@ -44,6 +44,7 @@ ERROR_MARKERS = (
 )
 MISSING_COMMAND_PATTERN = re.compile(r"command not found:\s*([a-z0-9._/+:-]+)")
 PORT_IN_USE_PATTERN = re.compile(r"port\s+(\d+)\s+is\s+in\s+use")
+HOOK_EVENTS = ("after-split-window", "after-new-window", "client-session-changed")
 
 
 @dataclass
@@ -2284,6 +2285,67 @@ def run_persistence_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_hooks_enable(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    if not session_exists(session):
+        raise ValueError(f"Session '{session}' does not exist")
+
+    script = Path(__file__).resolve()
+    paint_cmd = (
+        f"python3 {shlex.quote(str(script))} teams paint --session {shlex.quote(session)} "
+        f"--capture-lines {max(20, int(args.capture_lines))} --wait-attention-min {max(0, int(args.wait_attention_min))} "
+        "--no-colorize"
+    )
+    hook_cmd = f"run-shell -b {shlex.quote(paint_cmd + ' >/dev/null 2>&1')}"
+    for name in HOOK_EVENTS:
+        code, _, err = tmux(["set-hook", "-t", session, name, hook_cmd], timeout=5)
+        if code != 0:
+            raise ValueError(err.strip() or f"failed to set hook '{name}'")
+    print(f"Enabled hooks for session '{session}'")
+    for name in HOOK_EVENTS:
+        print(f"- {name}")
+    return 0
+
+
+def run_hooks_disable(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    if not session_exists(session):
+        raise ValueError(f"Session '{session}' does not exist")
+
+    for name in HOOK_EVENTS:
+        tmux(["set-hook", "-u", "-t", session, name], timeout=5)
+    print(f"Disabled hooks for session '{session}'")
+    return 0
+
+
+def run_hooks_status(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    if not session_exists(session):
+        raise ValueError(f"Session '{session}' does not exist")
+
+    code, out, err = tmux(["show-hooks", "-t", session], timeout=5)
+    if code != 0:
+        raise ValueError(err.strip() or f"failed to read hooks for session '{session}'")
+
+    found = 0
+    print(f"Hooks status for '{session}'")
+    for name in HOOK_EVENTS:
+        matched = [line.strip() for line in out.splitlines() if line.strip().startswith(name)]
+        if matched:
+            found += 1
+            print(f"- {name}: enabled")
+        else:
+            print(f"- {name}: disabled")
+    print(f"Enabled hooks: {found}/{len(HOOK_EVENTS)}")
+    return 0
+
+
 def doctor_fix_for_row(row: dict[str, Any]) -> str:
     missing_command = str(row.get("missing_command") or "")
     if missing_command:
@@ -2803,6 +2865,23 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     profile_use = profile_sub.add_parser("use", help="Activate a profile and apply managed sessions")
     profile_use.add_argument("name", help="Profile name")
     profile_use.set_defaults(handler=run_profile_use)
+
+    hooks = teams_sub.add_parser("hooks", help="Enable/disable tmux hooks for event-driven repaint")
+    hooks_sub = hooks.add_subparsers(dest="hooks_command", required=True)
+
+    hooks_status = hooks_sub.add_parser("status", help="Show hook status")
+    hooks_status.add_argument("--session", default=None)
+    hooks_status.set_defaults(handler=run_hooks_status)
+
+    hooks_enable = hooks_sub.add_parser("enable", help="Enable hooks for a session")
+    hooks_enable.add_argument("--session", default=None)
+    hooks_enable.add_argument("--capture-lines", type=int, default=80)
+    hooks_enable.add_argument("--wait-attention-min", type=int, default=1)
+    hooks_enable.set_defaults(handler=run_hooks_enable)
+
+    hooks_disable = hooks_sub.add_parser("disable", help="Disable hooks for a session")
+    hooks_disable.add_argument("--session", default=None)
+    hooks_disable.set_defaults(handler=run_hooks_disable)
 
     doctor = teams_sub.add_parser("doctor", help="Diagnose broken/waiting agent panes")
     doctor.add_argument("--session", default=None, help="Single tmux session (default: configured default_session)")
