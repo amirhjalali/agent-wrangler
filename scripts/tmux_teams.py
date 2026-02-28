@@ -111,6 +111,15 @@ def default_store() -> dict[str, Any]:
             "autosave_minutes": 15,
             "last_snapshot": "",
         },
+        "profiles": {
+            "current": "default",
+            "items": {
+                "default": {
+                    "managed_sessions": [],
+                    "max_panes": 10,
+                }
+            },
+        },
         "updated_at": now_iso(),
     }
 
@@ -136,6 +145,31 @@ def _normalize_store(data: dict[str, Any] | None) -> dict[str, Any]:
         "enabled": bool(persistence.get("enabled", base.get("persistence", {}).get("enabled", False))),
         "autosave_minutes": int(persistence.get("autosave_minutes", base.get("persistence", {}).get("autosave_minutes", 15))),
         "last_snapshot": str(persistence.get("last_snapshot", base.get("persistence", {}).get("last_snapshot", ""))),
+    }
+    profiles = current.get("profiles", {}) if isinstance(current.get("profiles"), dict) else {}
+    profile_items = profiles.get("items", {}) if isinstance(profiles.get("items"), dict) else {}
+    normalized_items: dict[str, dict[str, Any]] = {}
+    for key, value in profile_items.items():
+        if not isinstance(value, dict):
+            continue
+        name = str(key).strip()
+        if not name:
+            continue
+        managed_sessions = value.get("managed_sessions", [])
+        if not isinstance(managed_sessions, list):
+            managed_sessions = []
+        normalized_items[name] = {
+            "managed_sessions": [str(item).strip() for item in managed_sessions if str(item).strip()],
+            "max_panes": int(value.get("max_panes", 10) or 10),
+        }
+    if "default" not in normalized_items:
+        normalized_items["default"] = {"managed_sessions": [], "max_panes": 10}
+    current_profile = str(profiles.get("current") or "default").strip() or "default"
+    if current_profile not in normalized_items:
+        current_profile = "default"
+    merged["profiles"] = {
+        "current": current_profile,
+        "items": normalized_items,
     }
     return merged
 
@@ -1532,6 +1566,99 @@ def run_fleet_clear(_: argparse.Namespace) -> int:
     return 0
 
 
+def run_profile_list(_: argparse.Namespace) -> int:
+    store = load_store()
+    profiles = store.get("profiles", {})
+    current = str(profiles.get("current") or "default")
+    items = profiles.get("items", {}) if isinstance(profiles.get("items"), dict) else {}
+
+    print(f"Current profile: {current}")
+    if not items:
+        print("No profiles configured.")
+        return 0
+
+    print(f"{'PROFILE':<16} {'CURRENT':<7} {'MAX_PANES':<9} SESSIONS")
+    for name in sorted(items.keys()):
+        item = items.get(name, {})
+        sessions = item.get("managed_sessions", []) if isinstance(item.get("managed_sessions"), list) else []
+        max_panes = int(item.get("max_panes") or 10)
+        mark = "yes" if name == current else "no"
+        print(f"{name:<16} {mark:<7} {max_panes:<9} {', '.join(sessions) if sessions else '-'}")
+    return 0
+
+
+def run_profile_status(_: argparse.Namespace) -> int:
+    store = load_store()
+    profiles = store.get("profiles", {})
+    current = str(profiles.get("current") or "default")
+    items = profiles.get("items", {}) if isinstance(profiles.get("items"), dict) else {}
+    item = items.get(current, {}) if isinstance(items.get(current), dict) else {}
+    sessions = item.get("managed_sessions", []) if isinstance(item.get("managed_sessions"), list) else []
+    max_panes = int(item.get("max_panes") or 10)
+
+    print(f"Profile: {current}")
+    print(f"- max_panes: {max_panes}")
+    print(f"- managed_sessions: {', '.join(sessions) if sessions else '-'}")
+    print(f"- start hint: AW_MAX_PANES={max_panes} ./scripts/agent-wrangler start")
+    return 0
+
+
+def run_profile_save(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    profiles = store.setdefault("profiles", {})
+    items = profiles.setdefault("items", {})
+    if not isinstance(items, dict):
+        items = {}
+        profiles["items"] = items
+
+    name = str(args.name or "").strip().lower()
+    if not name:
+        raise ValueError("Profile name is required")
+
+    sessions = split_csv(args.sessions)
+    if not sessions:
+        sessions = store_managed_sessions(store)
+    if not sessions and args.auto_running:
+        sessions = [s for s in list_tmux_sessions() if s]
+
+    item = items.setdefault(name, {})
+    item["managed_sessions"] = sorted(set(sessions))
+    item["max_panes"] = max(1, int(args.max_panes))
+    save_store(store)
+
+    print(f"Saved profile '{name}'")
+    print(f"- max_panes: {item['max_panes']}")
+    print(f"- managed_sessions: {', '.join(item['managed_sessions']) if item['managed_sessions'] else '-'}")
+    return 0
+
+
+def run_profile_use(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    profiles = store.setdefault("profiles", {})
+    items = profiles.get("items", {}) if isinstance(profiles.get("items"), dict) else {}
+
+    name = str(args.name or "").strip().lower()
+    if name not in items:
+        known = ", ".join(sorted(items.keys()))
+        raise ValueError(f"Unknown profile '{name}'. Known: {known}")
+
+    profiles["current"] = name
+    item = items.get(name, {})
+    sessions = item.get("managed_sessions", []) if isinstance(item.get("managed_sessions"), list) else []
+    if sessions:
+        fleet = store.setdefault("fleet", {})
+        fleet["managed_sessions"] = sorted(set(str(s).strip() for s in sessions if str(s).strip()))
+    save_store(store)
+
+    print(f"Active profile: {name}")
+    print(f"- max_panes: {int(item.get('max_panes') or 10)}")
+    print(f"- managed_sessions: {', '.join(sessions) if sessions else '-'}")
+    print(f"- start hint: AW_MAX_PANES={int(item.get('max_panes') or 10)} ./scripts/agent-wrangler start")
+    return 0
+
+
 def run_fleet_status(args: argparse.Namespace) -> int:
     ensure_tmux()
     store = load_store()
@@ -2656,6 +2783,26 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
         help="Also run tmux-resurrect restore script after local restore",
     )
     persistence_restore.set_defaults(handler=run_persistence_restore)
+
+    profile = teams_sub.add_parser("profile", help="Manage workspace profiles (gabooja/personal/etc.)")
+    profile_sub = profile.add_subparsers(dest="profile_command", required=True)
+
+    profile_list = profile_sub.add_parser("list", help="List available profiles")
+    profile_list.set_defaults(handler=run_profile_list)
+
+    profile_status = profile_sub.add_parser("status", help="Show current profile")
+    profile_status.set_defaults(handler=run_profile_status)
+
+    profile_save = profile_sub.add_parser("save", help="Save/update a profile")
+    profile_save.add_argument("name", help="Profile name")
+    profile_save.add_argument("--sessions", help="Comma-separated tmux sessions for this profile")
+    profile_save.add_argument("--max-panes", type=int, default=10)
+    profile_save.add_argument("--auto-running", action="store_true", help="Fallback to all running tmux sessions")
+    profile_save.set_defaults(handler=run_profile_save)
+
+    profile_use = profile_sub.add_parser("use", help="Activate a profile and apply managed sessions")
+    profile_use.add_argument("name", help="Profile name")
+    profile_use.set_defaults(handler=run_profile_use)
 
     doctor = teams_sub.add_parser("doctor", help="Diagnose broken/waiting agent panes")
     doctor.add_argument("--session", default=None, help="Single tmux session (default: configured default_session)")

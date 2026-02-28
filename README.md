@@ -222,6 +222,11 @@ Use this when you want a real operator grid similar to "team sessions":
 ./scripts/agent-wrangler persistence save
 ./scripts/agent-wrangler persistence restore --force --attach
 
+# Profiles (switch operating modes)
+./scripts/agent-wrangler profile list
+./scripts/agent-wrangler profile save gabooja --sessions amir-grid --max-panes 12
+./scripts/agent-wrangler profile use gabooja
+
 # Program orchestration (team + loops + readiness gates)
 ./scripts/agent-wrangler program init
 ./scripts/agent-wrangler program team
@@ -283,6 +288,7 @@ Notes:
 - `fleet jump` opens a fast choose-tree jump flow (inside tmux) or direct session focus.
 - `fleet jump --fzf` gives a searchable selector with attention columns (works outside tmux too).
 - `persistence save/restore` gives local snapshot/recovery of your tmux team layout.
+- `profile use <name>` applies a workspace mode and can pin managed fleet sessions + preferred max panes.
 - `fleet popup` opens a live fleet manager view in a tmux popup for quick triage.
 - `program` gives a deep execution system with explicit team roles, loops, and readiness gates toward an impeccable product target.
 - `program daemon` runs unattended loops with automatic fleet repaint + optional guardrail enforcement.
