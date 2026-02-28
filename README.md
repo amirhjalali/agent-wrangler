@@ -31,6 +31,12 @@ Create full grid + manager + nav + detected agents in one command:
 ./scripts/agent-wrangler start
 ```
 
+Or run the interactive operator console (single entry point):
+
+```bash
+./scripts/agent-wrangler ops
+```
+
 ### 2) Start the fleet command center (manager-over-managers)
 
 ```bash
@@ -279,6 +285,10 @@ Use this when you want a real operator grid similar to "team sessions":
 ./scripts/agent-wrangler capture gabooja-agents --lines 40
 ./scripts/agent-wrangler kill gabooja-agents
 ```
+
+Single-script operations:
+- `./scripts/agent-wrangler ops`
+- Then choose actions by number (start, attach, focus pane, send command, launch agent, manager, jump, doctor, persistence, profile, program status).
 
 Notes:
 - `hq` is a thin shortcut for `agent-wrangler up`.

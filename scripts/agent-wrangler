@@ -49,10 +49,13 @@ Agent Wrangler shortcuts:
     -> routed to: teams fleet ...
   program ...
     -> routed to: program_orchestrator.py
+  ops
+    -> routed to: command_center.py ops (interactive operator console)
   overview
     -> routed to: ui
 
 Examples:
+  ./scripts/agent-wrangler ops
   ./scripts/agent-wrangler start
   ./scripts/agent-wrangler up --rebuild --mode import --preserve-duplicates --max-panes 10 --nav --manager --manager-replace
   ./scripts/agent-wrangler fleet manager --replace --update-defaults

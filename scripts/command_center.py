@@ -1781,9 +1781,105 @@ def run_palette(_: argparse.Namespace) -> int:
     print(f"31. {PRIMARY_CLI} program phases --refresh-state")
     print(f"32. {PRIMARY_CLI} program promote")
     print(f"33. {PRIMARY_CLI} program complete")
+    print(f"34. {PRIMARY_CLI} ops")
     print("Legacy aliases still work: cc, hq, teams")
     return 0
 
+
+def _run_ops_command(command: list[str]) -> int:
+    cmd = [str(ROOT / "scripts" / "agent-wrangler"), *command]
+    print("")
+    print("$ " + " ".join(cmd))
+    proc = subprocess.run(cmd, check=False)
+    return int(proc.returncode)
+
+
+def run_ops(_: argparse.Namespace) -> int:
+    actions: list[tuple[str, list[str]]] = [
+        ("Start all (import + grid + manager + nav)", ["start"]),
+        ("Attach grid session", ["attach"]),
+        ("Show pane status", ["status"]),
+        ("Focus pane by project/token and attach", ["__focus__"]),
+        ("Send command to pane/project token", ["__send__"]),
+        ("Launch agent in pane/project token", ["__agent__"]),
+        ("Stop pane (Ctrl-C) by project/token", ["__stop__"]),
+        ("Open manager window", ["manager", "--replace"]),
+        ("Fleet status", ["fleet", "status"]),
+        ("Fleet jump (fzf)", ["fleet", "jump", "--fzf"]),
+        ("Doctor (fleet attention)", ["doctor", "--fleet", "--only-attention"]),
+        ("Enable hooks", ["hooks", "enable"]),
+        ("Persistence save", ["persistence", "save"]),
+        ("Persistence restore (last snapshot)", ["persistence", "restore", "--force", "--attach"]),
+        ("Profile status", ["profile", "status"]),
+        ("Profile list", ["profile", "list"]),
+        ("Program status", ["program", "status"]),
+    ]
+
+    print("Agent Wrangler Ops Console")
+    print("Single-command control center. Enter number, or q to quit.")
+
+    while True:
+        print("")
+        for idx, (label, _command) in enumerate(actions, start=1):
+            print(f"{idx:>2}. {label}")
+        print(" q. Quit")
+
+        choice = input("ops> ").strip().lower()
+        if choice in {"q", "quit", "exit"}:
+            print("ops closed")
+            return 0
+        if not choice:
+            continue
+        if not choice.isdigit():
+            print("Invalid choice. Enter a number or q.")
+            continue
+
+        idx = int(choice)
+        if idx < 1 or idx > len(actions):
+            print("Invalid choice. Pick one of the listed numbers.")
+            continue
+
+        label, command = actions[idx - 1]
+        print(f"Running: {label}")
+        if command == ["__focus__"]:
+            token = input("pane token (project/id/index/title): ").strip()
+            if not token:
+                print("No token entered.")
+                continue
+            code = _run_ops_command(["focus", token, "--attach"])
+            print(f"Exit code: {code}")
+            continue
+        if command == ["__send__"]:
+            token = input("pane token (project/id/index/title): ").strip()
+            text = input("command to send: ").strip()
+            if not token or not text:
+                print("Token and command are required.")
+                continue
+            code = _run_ops_command(["send", token, "--command", text])
+            print(f"Exit code: {code}")
+            continue
+        if command == ["__agent__"]:
+            token = input("pane token (project/id/index/title): ").strip()
+            tool = input("tool (claude|codex|aider|gemini): ").strip().lower()
+            if tool not in {"claude", "codex", "aider", "gemini"}:
+                print("Invalid tool. Use claude, codex, aider, or gemini.")
+                continue
+            if not token:
+                print("Pane token is required.")
+                continue
+            code = _run_ops_command(["agent", token, tool])
+            print(f"Exit code: {code}")
+            continue
+        if command == ["__stop__"]:
+            token = input("pane token (project/id/index/title): ").strip()
+            if not token:
+                print("Pane token is required.")
+                continue
+            code = _run_ops_command(["stop", token])
+            print(f"Exit code: {code}")
+            continue
+        code = _run_ops_command(command)
+        print(f"Exit code: {code}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1818,6 +1914,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     palette = sub.add_parser("palette", help="Show quick command palette shortcuts")
     palette.set_defaults(handler=run_palette)
+
+    ops = sub.add_parser("ops", help="Interactive one-screen operator console")
+    ops.set_defaults(handler=run_ops)
 
     gastown = sub.add_parser("gastown", help="Planning board operations")
     gastown_sub = gastown.add_subparsers(dest="gastown_command", required=True)
