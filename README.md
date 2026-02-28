@@ -294,6 +294,7 @@ Notes:
 - `persistence save/restore` gives local snapshot/recovery of your tmux team layout.
 - `profile use <name>` applies a workspace mode and can pin managed fleet sessions + preferred max panes.
 - `hooks enable` adds tmux event hooks so health repaint reacts to pane/session changes immediately.
+- `start` now reads max panes from the active profile automatically (override with `AW_MAX_PANES`).
 - `fleet popup` opens a live fleet manager view in a tmux popup for quick triage.
 - `program` gives a deep execution system with explicit team roles, loops, and readiness gates toward an impeccable product target.
 - `program daemon` runs unattended loops with automatic fleet repaint + optional guardrail enforcement.

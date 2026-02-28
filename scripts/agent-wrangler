@@ -3,6 +3,41 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+resolve_max_panes() {
+  if [[ -n "${AW_MAX_PANES:-}" ]]; then
+    echo "$AW_MAX_PANES"
+    return
+  fi
+
+  local config_path="$SCRIPT_DIR/../config/team_grid.json"
+  if [[ ! -f "$config_path" ]]; then
+    echo "10"
+    return
+  fi
+
+  python3 - "$config_path" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+default = 10
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    profiles = data.get("profiles", {}) if isinstance(data, dict) else {}
+    current = str(profiles.get("current") or "default")
+    items = profiles.get("items", {}) if isinstance(profiles.get("items"), dict) else {}
+    item = items.get(current, {}) if isinstance(items.get(current), dict) else {}
+    value = item.get("max_panes")
+    if isinstance(value, int) and value > 0:
+        print(value)
+        raise SystemExit(0)
+except Exception:
+    pass
+print(default)
+PY
+}
+
 if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 Agent Wrangler shortcuts:
@@ -34,7 +69,8 @@ fi
 case "${1:-}" in
   start)
     shift
-    set -- teams up --rebuild --mode import --preserve-duplicates --max-panes "${AW_MAX_PANES:-10}" --startup --agent --nav --manager --manager-replace "$@"
+    MAX_PANES="$(resolve_max_panes)"
+    set -- teams up --rebuild --mode import --preserve-duplicates --max-panes "$MAX_PANES" --startup --agent --nav --manager --manager-replace "$@"
     ;;
   up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift)
     set -- teams "$@"
