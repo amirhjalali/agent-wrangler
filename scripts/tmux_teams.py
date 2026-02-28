@@ -1650,6 +1650,69 @@ def run_fleet_jump(args: argparse.Namespace) -> int:
             raise ValueError(f"Session '{target}' is not in current fleet set. Known: {known}")
         return run_fleet_focus(argparse.Namespace(session_name=target))
 
+    if args.fzf:
+        if not shutil.which("fzf"):
+            raise ValueError("fzf is not installed. Install with: brew install fzf")
+
+        rows = fleet_health_rows(
+            sessions=sessions,
+            capture_lines=max(20, int(args.capture_lines)),
+            wait_attention_min=max(0, int(args.wait_attention_min)),
+            apply_colors=False,
+        )
+        line_rows: list[str] = []
+        for row in rows:
+            line_rows.append(
+                "{session}\tattn={attention}\twait={waiting}\tact={active}\tred={red}\t{reason}".format(
+                    session=str(row.get("session") or "-"),
+                    attention=int(row.get("attention") or 0),
+                    waiting=int(row.get("waiting") or 0),
+                    active=int(row.get("active") or 0),
+                    red=int(row.get("red") or 0),
+                    reason=str(row.get("top_reason") or row.get("error") or "-"),
+                )
+            )
+
+        proc = subprocess.run(
+            [
+                "fzf",
+                "--prompt",
+                "fleet> ",
+                "--layout",
+                "reverse",
+                "--height",
+                "60%",
+                "--border",
+                "--delimiter",
+                "\t",
+                "--with-nth",
+                "1,2,3,4,5,6",
+                "--header",
+                "SESSION\tATTN\tWAIT\tACTIVE\tRED\tTOP_REASON",
+            ],
+            input="\n".join(line_rows),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            if proc.returncode == 130:
+                print("jump cancelled")
+                return 0
+            detail = (proc.stderr or "").strip()
+            raise ValueError(detail or "fzf selection failed")
+
+        chosen = (proc.stdout or "").strip()
+        if not chosen:
+            print("jump cancelled")
+            return 0
+        target = chosen.split("\t", 1)[0].strip()
+        if not target:
+            print("jump cancelled")
+            return 0
+        return run_fleet_focus(argparse.Namespace(session_name=target))
+
     if os.environ.get("TMUX"):
         # Native tmux picker for fastest in-client jump navigation.
         code, _, err = tmux(["choose-tree", "-Zw"], timeout=20)
@@ -2206,6 +2269,9 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     fleet_jump.add_argument("--sessions", help="Comma-separated session override")
     fleet_jump.add_argument("--pattern", help="Filter sessions by substring")
     fleet_jump.add_argument("--include-manager", action="store_true")
+    fleet_jump.add_argument("--fzf", action="store_true", help="Use fzf selector (inside or outside tmux)")
+    fleet_jump.add_argument("--capture-lines", type=int, default=40, help="Capture lines for attention context in fzf mode")
+    fleet_jump.add_argument("--wait-attention-min", type=int, default=1, help="Waiting threshold in minutes for fzf mode")
     fleet_jump.set_defaults(handler=run_fleet_jump)
 
     fleet_popup = fleet_sub.add_parser("popup", help="Open fleet watch in a tmux popup")

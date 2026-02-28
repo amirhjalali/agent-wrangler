@@ -208,6 +208,7 @@ Use this when you want a real operator grid similar to "team sessions":
 ./scripts/agent-wrangler fleet manager --replace --update-defaults
 ./scripts/agent-wrangler fleet focus amir-grid
 ./scripts/agent-wrangler fleet jump
+./scripts/agent-wrangler fleet jump --fzf
 ./scripts/agent-wrangler fleet popup
 
 # Repo drift view (AOE-style diff/dirty awareness)
@@ -272,6 +273,7 @@ Notes:
 - `fleet set` lets you pin exactly which tmux sessions count as your operating universe.
 - `drift --fleet` gives a fast per-project branch/dirty summary across active sessions.
 - `fleet jump` opens a fast choose-tree jump flow (inside tmux) or direct session focus.
+- `fleet jump --fzf` gives a searchable selector with attention columns (works outside tmux too).
 - `fleet popup` opens a live fleet manager view in a tmux popup for quick triage.
 - `program` gives a deep execution system with explicit team roles, loops, and readiness gates toward an impeccable product target.
 - `program daemon` runs unattended loops with automatic fleet repaint + optional guardrail enforcement.
