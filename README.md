@@ -14,6 +14,7 @@ Prerequisites:
 
 ```bash
 brew install tmux
+brew install fzf   # optional but recommended for fleet jump
 ```
 
 ### 1) Import your current Ghostty work into tmux
@@ -216,6 +217,11 @@ Use this when you want a real operator grid similar to "team sessions":
 ./scripts/agent-wrangler drift --fleet --alert-dirty 25
 ./scripts/agent-wrangler doctor --fleet --only-attention
 
+# Persistence (save/restore session layouts)
+./scripts/agent-wrangler persistence status
+./scripts/agent-wrangler persistence save
+./scripts/agent-wrangler persistence restore --force --attach
+
 # Program orchestration (team + loops + readiness gates)
 ./scripts/agent-wrangler program init
 ./scripts/agent-wrangler program team
@@ -276,6 +282,7 @@ Notes:
 - `doctor --fleet --only-attention` finds red/waiting panes and prints concrete remediation actions.
 - `fleet jump` opens a fast choose-tree jump flow (inside tmux) or direct session focus.
 - `fleet jump --fzf` gives a searchable selector with attention columns (works outside tmux too).
+- `persistence save/restore` gives local snapshot/recovery of your tmux team layout.
 - `fleet popup` opens a live fleet manager view in a tmux popup for quick triage.
 - `program` gives a deep execution system with explicit team roles, loops, and readiness gates toward an impeccable product target.
 - `program daemon` runs unattended loops with automatic fleet repaint + optional guardrail enforcement.

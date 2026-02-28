@@ -22,6 +22,7 @@ import workflow_agent
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "team_grid.json"
+PERSISTENCE_DIR = ROOT / ".state" / "persistence"
 
 DEFAULT_SESSION = "amir-grid"
 DEFAULT_LAYOUT = "auto"
@@ -105,6 +106,11 @@ def default_store() -> dict[str, Any]:
             "manager_session": DEFAULT_FLEET_MANAGER_SESSION,
             "manager_window": DEFAULT_FLEET_MANAGER_WINDOW,
         },
+        "persistence": {
+            "enabled": False,
+            "autosave_minutes": 15,
+            "last_snapshot": "",
+        },
         "updated_at": now_iso(),
     }
 
@@ -125,6 +131,12 @@ def _normalize_store(data: dict[str, Any] | None) -> dict[str, Any]:
     managed = merged.get("fleet", {}).get("managed_sessions")
     if not isinstance(managed, list):
         merged["fleet"]["managed_sessions"] = []
+    persistence = current.get("persistence", {}) if isinstance(current.get("persistence"), dict) else {}
+    merged["persistence"] = {
+        "enabled": bool(persistence.get("enabled", base.get("persistence", {}).get("enabled", False))),
+        "autosave_minutes": int(persistence.get("autosave_minutes", base.get("persistence", {}).get("autosave_minutes", 15))),
+        "last_snapshot": str(persistence.get("last_snapshot", base.get("persistence", {}).get("last_snapshot", ""))),
+    }
     return merged
 
 
@@ -143,6 +155,35 @@ def save_store(store: dict[str, Any]) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     normalized["updated_at"] = now_iso()
     CONFIG_PATH.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+
+
+def sanitize_snapshot_name(name: str) -> str:
+    raw = (name or "").strip()
+    if not raw:
+        raw = "snapshot"
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-.")
+    if not safe:
+        safe = "snapshot"
+    if not safe.endswith(".json"):
+        safe += ".json"
+    return safe
+
+
+def persistence_snapshot_path(name: str) -> Path:
+    return PERSISTENCE_DIR / sanitize_snapshot_name(name)
+
+
+def session_window_layout(session: str) -> str:
+    code, out, err = tmux(["list-windows", "-t", f"{session}:0", "-F", "#{window_layout}"], timeout=5)
+    if code != 0:
+        raise ValueError(err.strip() or f"failed to read window layout for session '{session}'")
+    first = out.splitlines()[0].strip() if out else ""
+    return first or "tiled"
+
+
+def tmux_resurrect_scripts() -> tuple[Path, Path]:
+    base = Path.home() / ".tmux" / "plugins" / "tmux-resurrect" / "scripts"
+    return (base / "save.sh", base / "restore.sh")
 
 
 def project_map() -> dict[str, dict[str, Any]]:
@@ -1904,6 +1945,218 @@ def run_drift(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_persistence_status(_: argparse.Namespace) -> int:
+    store = load_store()
+    persistence = store.get("persistence", {})
+    enabled = bool(persistence.get("enabled"))
+    autosave = int(persistence.get("autosave_minutes") or 15)
+    last_snapshot = str(persistence.get("last_snapshot") or "")
+    save_script, restore_script = tmux_resurrect_scripts()
+
+    print("Persistence status")
+    print(f"- enabled: {'yes' if enabled else 'no'}")
+    print(f"- autosave_minutes: {autosave}")
+    print(f"- last_snapshot: {last_snapshot or '-'}")
+    print(f"- tmux-resurrect save script: {'yes' if save_script.exists() else 'no'} ({save_script})")
+    print(f"- tmux-resurrect restore script: {'yes' if restore_script.exists() else 'no'} ({restore_script})")
+
+    snapshots: list[Path] = []
+    if PERSISTENCE_DIR.exists():
+        snapshots = sorted(PERSISTENCE_DIR.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    print(f"- local snapshots: {len(snapshots)}")
+    for path in snapshots[:10]:
+        stamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(microsecond=0).isoformat()
+        print(f"  {path.name}  {stamp}")
+    return 0
+
+
+def run_persistence_enable(args: argparse.Namespace) -> int:
+    store = load_store()
+    persistence = store.setdefault("persistence", {})
+    persistence["enabled"] = True
+    persistence["autosave_minutes"] = max(1, int(args.autosave_minutes))
+    save_store(store)
+    print(
+        "Persistence enabled (autosave_minutes={mins}).".format(
+            mins=int(persistence.get("autosave_minutes") or 15)
+        )
+    )
+    print("Tip: run `agent-wrangler persistence save` at key checkpoints.")
+    return 0
+
+
+def run_persistence_disable(_: argparse.Namespace) -> int:
+    store = load_store()
+    persistence = store.setdefault("persistence", {})
+    persistence["enabled"] = False
+    save_store(store)
+    print("Persistence disabled.")
+    return 0
+
+
+def run_persistence_save(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    if not session_exists(session):
+        raise ValueError(f"Session '{session}' does not exist")
+
+    proj_map = project_map()
+    panes = backfill_pane_project_ids(session, list_panes(session), proj_map)
+    by_tty = session_monitor_by_tty()
+    pane_rows: list[dict[str, Any]] = []
+    for pane in panes:
+        tty_short = pane.pane_tty.split("/")[-1]
+        monitor = by_tty.get(tty_short, {})
+        pane_rows.append(
+            {
+                "index": pane.pane_index,
+                "project_id": pane.project_id or pane.pane_title or f"pane-{pane.pane_index}",
+                "title": pane.pane_title,
+                "path": pane.pane_path,
+                "tty": tty_short,
+                "agent": str(monitor.get("agent") or ""),
+                "status": str(monitor.get("status") or ""),
+            }
+        )
+
+    layout_hint = str(store.get("default_layout") or DEFAULT_LAYOUT)
+    data = {
+        "saved_at": now_iso(),
+        "session": session,
+        "layout": (layout_hint if layout_hint in LAYOUT_CHOICES else DEFAULT_LAYOUT),
+        "pane_count": len(pane_rows),
+        "panes": pane_rows,
+    }
+
+    if args.file:
+        snapshot_path = Path(args.file).expanduser()
+    else:
+        snapshot_path = persistence_snapshot_path(args.name or session)
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    persistence = store.setdefault("persistence", {})
+    persistence["last_snapshot"] = str(snapshot_path)
+    save_store(store)
+
+    print(f"Saved persistence snapshot: {snapshot_path}")
+    print(f"Session: {session}  panes={len(pane_rows)}")
+
+    if args.tmux_resurrect:
+        save_script, _ = tmux_resurrect_scripts()
+        if not save_script.exists():
+            raise ValueError(f"tmux-resurrect save script not found: {save_script}")
+        code, _, err = run([str(save_script)], timeout=45)
+        if code != 0:
+            detail = (err or "").strip()
+            raise ValueError(detail or "tmux-resurrect save failed")
+        print("tmux-resurrect save completed.")
+    return 0
+
+
+def run_persistence_restore(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    if args.file:
+        snapshot_path = Path(args.file).expanduser()
+    elif args.name:
+        snapshot_path = persistence_snapshot_path(args.name)
+    else:
+        remembered = str(store.get("persistence", {}).get("last_snapshot") or "")
+        snapshot_path = Path(remembered).expanduser() if remembered else persistence_snapshot_path(
+            store.get("default_session") or DEFAULT_SESSION
+        )
+    if not snapshot_path.exists():
+        raise ValueError(f"snapshot file not found: {snapshot_path}")
+
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"invalid snapshot file: {snapshot_path} ({exc})") from exc
+
+    pane_items = payload.get("panes", [])
+    if not isinstance(pane_items, list) or not pane_items:
+        raise ValueError("snapshot has no panes")
+
+    session = args.session or str(payload.get("session") or store.get("default_session") or DEFAULT_SESSION)
+    proj_map = project_map()
+    project_ids: list[str] = []
+    project_overrides: dict[str, dict[str, Any]] = {}
+    agent_by_project: dict[str, str] = {}
+    seen: dict[str, int] = {}
+
+    for idx, pane in enumerate(pane_items):
+        if not isinstance(pane, dict):
+            continue
+        base_project_id = str(pane.get("project_id") or pane.get("title") or f"pane-{idx + 1}").strip()
+        if not base_project_id or base_project_id == "-":
+            base_project_id = f"pane-{idx + 1}"
+        count = seen.get(base_project_id, 0) + 1
+        seen[base_project_id] = count
+        project_id = base_project_id if count == 1 else f"{base_project_id}__rest{count}"
+
+        path = str(pane.get("path") or "").strip()
+        if not path:
+            path = str(proj_map.get(base_project_id, {}).get("path") or "").strip()
+        if not path:
+            continue
+
+        base_project = dict(proj_map.get(base_project_id, {}))
+        base_project["path"] = path
+        base_project.setdefault("startup_command", "")
+        project_overrides[project_id] = base_project
+        project_ids.append(project_id)
+
+        agent = str(pane.get("agent") or "").strip().lower()
+        if agent in {"claude", "codex", "aider", "gemini"}:
+            agent_by_project[project_id] = agent
+
+    if not project_ids:
+        raise ValueError("snapshot has no restorable pane paths")
+
+    layout_hint = str(payload.get("layout") or DEFAULT_LAYOUT)
+    layout = args.layout or (layout_hint if layout_hint in LAYOUT_CHOICES else DEFAULT_LAYOUT)
+    resolved_layout, _ = create_grid_session(
+        session=session,
+        layout=layout,
+        project_ids=project_ids,
+        proj_map=proj_map,
+        project_overrides=project_overrides,
+        no_startup=(not args.startup),
+        agent_default=None,
+        agent_by_project=(agent_by_project if args.agent else None),
+        force=args.force,
+    )
+
+    store["default_session"] = session
+    store["default_layout"] = resolved_layout
+    store["default_projects"] = project_ids
+    persistence = store.setdefault("persistence", {})
+    persistence["last_snapshot"] = str(snapshot_path)
+    save_store(store)
+
+    print(f"Restored snapshot into session '{session}'")
+    print(f"Panes: {len(project_ids)}  Layout: {resolved_layout}")
+    print(f"Source: {snapshot_path}")
+    print(f"Startup commands: {'enabled' if args.startup else 'disabled'}")
+    print(f"Agent relaunch: {'enabled' if args.agent else 'disabled'}")
+
+    if args.tmux_resurrect:
+        _, restore_script = tmux_resurrect_scripts()
+        if not restore_script.exists():
+            raise ValueError(f"tmux-resurrect restore script not found: {restore_script}")
+        code, _, err = run([str(restore_script)], timeout=60)
+        if code != 0:
+            detail = (err or "").strip()
+            raise ValueError(detail or "tmux-resurrect restore failed")
+        print("tmux-resurrect restore completed.")
+
+    if args.attach:
+        return attach_session(session)
+    return 0
+
+
 def doctor_fix_for_row(row: dict[str, Any]) -> str:
     missing_command = str(row.get("missing_command") or "")
     if missing_command:
@@ -2367,6 +2620,42 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     projects = teams_sub.add_parser("projects", help="List known projects for team panes")
     projects.add_argument("--group", choices=["business", "personal"])
     projects.set_defaults(handler=run_list_projects)
+
+    persistence = teams_sub.add_parser("persistence", help="Save/restore tmux workspace state")
+    persistence_sub = persistence.add_subparsers(dest="persistence_command", required=True)
+
+    persistence_status = persistence_sub.add_parser("status", help="Show persistence settings and snapshots")
+    persistence_status.set_defaults(handler=run_persistence_status)
+
+    persistence_enable = persistence_sub.add_parser("enable", help="Enable persistence mode")
+    persistence_enable.add_argument("--autosave-minutes", type=int, default=15)
+    persistence_enable.set_defaults(handler=run_persistence_enable)
+
+    persistence_disable = persistence_sub.add_parser("disable", help="Disable persistence mode")
+    persistence_disable.set_defaults(handler=run_persistence_disable)
+
+    persistence_save = persistence_sub.add_parser("save", help="Save current session snapshot")
+    persistence_save.add_argument("--session", default=None)
+    persistence_save.add_argument("--name", help="Snapshot name (without .json is fine)")
+    persistence_save.add_argument("--file", help="Explicit snapshot file path")
+    persistence_save.add_argument("--tmux-resurrect", action="store_true", help="Also run tmux-resurrect save script")
+    persistence_save.set_defaults(handler=run_persistence_save)
+
+    persistence_restore = persistence_sub.add_parser("restore", help="Restore a saved session snapshot")
+    persistence_restore.add_argument("--session", default=None)
+    persistence_restore.add_argument("--name", help="Snapshot name (without .json is fine)")
+    persistence_restore.add_argument("--file", help="Explicit snapshot file path")
+    persistence_restore.add_argument("--layout", choices=LAYOUT_CHOICES, default=None)
+    persistence_restore.add_argument("--startup", action="store_true", help="Run startup commands after restore")
+    persistence_restore.add_argument("--agent", action="store_true", help="Relaunch detected agents after restore")
+    persistence_restore.add_argument("--force", action="store_true", help="Replace existing session")
+    persistence_restore.add_argument("--attach", action="store_true", help="Attach after restore")
+    persistence_restore.add_argument(
+        "--tmux-resurrect",
+        action="store_true",
+        help="Also run tmux-resurrect restore script after local restore",
+    )
+    persistence_restore.set_defaults(handler=run_persistence_restore)
 
     doctor = teams_sub.add_parser("doctor", help="Diagnose broken/waiting agent panes")
     doctor.add_argument("--session", default=None, help="Single tmux session (default: configured default_session)")
