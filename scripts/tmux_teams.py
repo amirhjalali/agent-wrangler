@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -40,6 +41,8 @@ ERROR_MARKERS = (
     "zsh: command not found",
     "err_pnpm_recursive_run_first_fail",
 )
+MISSING_COMMAND_PATTERN = re.compile(r"command not found:\s*([a-z0-9._/+:-]+)")
+PORT_IN_USE_PATTERN = re.compile(r"port\s+(\d+)\s+is\s+in\s+use")
 
 
 @dataclass
@@ -384,6 +387,25 @@ def detect_error_marker(text: str) -> str | None:
     return None
 
 
+def detect_missing_command(text: str) -> str | None:
+    if not text:
+        return None
+    match = MISSING_COMMAND_PATTERN.search(text)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+def detect_port_in_use(text: str) -> str | None:
+    if not text:
+        return None
+    match = PORT_IN_USE_PATTERN.search(text)
+    if not match:
+        return None
+    return match.group(1).strip() or None
+
+
 def pane_health_level(
     monitor: dict[str, Any],
     error_marker: str | None,
@@ -449,12 +471,19 @@ def refresh_pane_health(
         agent = str(monitor.get("agent") or "-")
         status = str(monitor.get("status") or "idle")
         wait = monitor.get("waiting_minutes")
-        error_marker = detect_error_marker(capture_pane_text(pane.pane_id, lines=capture_lines))
+        pane_text = capture_pane_text(pane.pane_id, lines=capture_lines)
+        error_marker = detect_error_marker(pane_text)
+        missing_command = detect_missing_command(pane_text)
+        port_in_use = detect_port_in_use(pane_text)
         level, needs_attention, reason = pane_health_level(
             monitor=monitor,
             error_marker=error_marker,
             wait_attention_min=wait_attention_min,
         )
+        if reason.startswith("error: zsh: command not found") and missing_command:
+            reason = f"missing command: {missing_command}"
+        elif port_in_use and not reason.startswith("error:"):
+            reason = f"port in use: {port_in_use}"
 
         tmux(["set-option", "-p", "-t", pane.pane_id, "@agent", agent], timeout=5)
         tmux(["set-option", "-p", "-t", pane.pane_id, "@health", level.upper()], timeout=5)
@@ -479,6 +508,9 @@ def refresh_pane_health(
                 "health": level,
                 "needs_attention": needs_attention,
                 "reason": reason,
+                "error_marker": error_marker,
+                "missing_command": missing_command,
+                "port_in_use": port_in_use,
             }
         )
     return rows
@@ -1226,6 +1258,37 @@ def run_watch(args: argparse.Namespace) -> int:
                     f"{wait:<6} {row['agent']:<8} {row['reason']}"
                 )
 
+            attention_rows = [row for row in rows if row.get("needs_attention") or str(row.get("health")) == "red"]
+            if attention_rows:
+                attention_rows.sort(
+                    key=lambda row: (
+                        0 if str(row.get("health")) == "red" else 1,
+                        -(int(row.get("wait") or 0)),
+                    )
+                )
+                print("")
+                print("Top attention panes:")
+                for row in attention_rows[:5]:
+                    fix = ""
+                    missing_command = str(row.get("missing_command") or "")
+                    if missing_command:
+                        if missing_command == "code":
+                            fix = "fix: use `codex` or install VS Code `code` shell command"
+                        else:
+                            fix = f"fix: install `{missing_command}` or update startup_command"
+                    elif row.get("port_in_use"):
+                        fix = f"fix: free port {row['port_in_use']} or change PORT"
+                    elif str(row.get("reason", "")).startswith("waiting"):
+                        fix = f"fix: inspect pane: agent-wrangler capture {row['project_id']} --lines 60"
+                    print(
+                        "- {project} ({tty}) {reason}{fix}".format(
+                            project=row.get("project_id", "-"),
+                            tty=row.get("tty", "-"),
+                            reason=row.get("reason", "-"),
+                            fix=(f" | {fix}" if fix else ""),
+                        )
+                    )
+
             print("")
             print(
                 "Navigation: Option+Arrow panes | Option+[ / Option+] windows | Option+1..9 window jump "
@@ -1841,6 +1904,119 @@ def run_drift(args: argparse.Namespace) -> int:
     return 0
 
 
+def doctor_fix_for_row(row: dict[str, Any]) -> str:
+    missing_command = str(row.get("missing_command") or "")
+    if missing_command:
+        if missing_command == "code":
+            return "Use `codex` for OpenAI Codex CLI, or install VS Code shell command `code`."
+        if missing_command in {"claude", "codex", "aider", "gemini"} and not shutil.which(missing_command):
+            return f"Install `{missing_command}` and ensure it is on PATH."
+        if missing_command == "pnpm" and not shutil.which("pnpm"):
+            return "Install pnpm (`brew install pnpm`) or update startup_command to npm/bun."
+        if missing_command == "bun" and not shutil.which("bun"):
+            return "Install bun (`brew install oven-sh/bun/bun`) or switch startup_command."
+        return f"Install `{missing_command}` or fix the startup command for this project."
+    port = str(row.get("port_in_use") or "")
+    if port:
+        return f"Free port {port} (`lsof -i :{port}`) or run this app on a different port."
+    reason = str(row.get("reason") or "")
+    if reason.startswith("waiting"):
+        return "Session is waiting for input; inspect prompt and continue/stop task."
+    if str(row.get("error_marker") or "") in {"elifecycle", "command failed", "exited (1)", "err_pnpm_recursive_run_first_fail"}:
+        return "Open pane logs and rerun startup command manually to verify package scripts."
+    return "Inspect pane output and restart shell or command if needed."
+
+
+def run_doctor(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+
+    if args.fleet:
+        sessions = resolve_fleet_sessions(
+            store=store,
+            explicit_csv=args.sessions,
+            pattern=args.pattern,
+            include_manager=args.include_manager,
+        )
+    else:
+        session = args.session or store.get("default_session") or DEFAULT_SESSION
+        sessions = [session]
+
+    if not sessions:
+        print("No sessions selected for doctor.")
+        return 0
+
+    print("Agent Wrangler Doctor")
+    print("Tool availability:")
+    for tool in ["claude", "codex", "aider", "gemini", "npm", "pnpm", "bun", "fzf"]:
+        ok = "yes" if shutil.which(tool) else "no"
+        print(f"- {tool:<7} installed={ok}")
+
+    total_findings = 0
+    for session in sessions:
+        print("")
+        print(f"[{session}]")
+        if not session_exists(session):
+            print("- missing session")
+            continue
+
+        rows = refresh_pane_health(
+            session=session,
+            capture_lines=max(20, int(args.capture_lines)),
+            wait_attention_min=max(0, int(args.wait_attention_min)),
+            apply_colors=False,
+        )
+        if args.only_attention:
+            rows = [row for row in rows if row.get("needs_attention") or str(row.get("health")) == "red"]
+
+        findings: list[dict[str, Any]] = []
+        for row in rows:
+            if row.get("missing_command"):
+                findings.append(row)
+                continue
+            if row.get("port_in_use"):
+                findings.append(row)
+                continue
+            if str(row.get("health")) == "red":
+                findings.append(row)
+                continue
+            if str(row.get("reason") or "").startswith("waiting") and int(row.get("wait") or 0) >= max(
+                1, int(args.wait_attention_min)
+            ):
+                findings.append(row)
+
+        if not findings:
+            print("- no critical findings")
+            continue
+
+        findings.sort(
+            key=lambda row: (
+                0 if str(row.get("health")) == "red" else 1,
+                -(int(row.get("wait") or 0)),
+            )
+        )
+        total_findings += len(findings)
+        for row in findings:
+            wait = f"{row['wait']}m" if row.get("wait") is not None else "-"
+            print(
+                "! pane={index:<2} project={project:<22} health={health:<6} status={status:<10} wait={wait:<6} reason={reason}".format(
+                    index=int(row.get("index") or 0),
+                    project=str(row.get("project_id") or "-")[:22],
+                    health=str(row.get("health") or "-"),
+                    status=str(row.get("status") or "-"),
+                    wait=wait,
+                    reason=str(row.get("reason") or "-"),
+                )
+            )
+            print(f"  action: {doctor_fix_for_row(row)}")
+
+    print("")
+    print(f"Doctor summary: sessions={len(sessions)} findings={total_findings}")
+    if total_findings > 0:
+        print("Next: fix highest-red panes, then rerun `agent-wrangler doctor --fleet`.")
+    return 0
+
+
 def run_nav(args: argparse.Namespace) -> int:
     ensure_tmux()
     pane_bindings = [
@@ -2191,6 +2367,17 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     projects = teams_sub.add_parser("projects", help="List known projects for team panes")
     projects.add_argument("--group", choices=["business", "personal"])
     projects.set_defaults(handler=run_list_projects)
+
+    doctor = teams_sub.add_parser("doctor", help="Diagnose broken/waiting agent panes")
+    doctor.add_argument("--session", default=None, help="Single tmux session (default: configured default_session)")
+    doctor.add_argument("--fleet", action="store_true", help="Run diagnostics across fleet sessions")
+    doctor.add_argument("--sessions", help="Comma-separated sessions override for --fleet")
+    doctor.add_argument("--pattern", help="Filter fleet sessions by substring")
+    doctor.add_argument("--include-manager", action="store_true", help="Include fleet manager session in --fleet mode")
+    doctor.add_argument("--capture-lines", type=int, default=120, help="Recent pane lines to inspect for issues")
+    doctor.add_argument("--wait-attention-min", type=int, default=1, help="Waiting threshold in minutes")
+    doctor.add_argument("--only-attention", action="store_true", help="Only print panes that need attention")
+    doctor.set_defaults(handler=run_doctor)
 
     drift = teams_sub.add_parser("drift", help="Show git drift for pane projects (AOE-style)")
     drift.add_argument("--session", default=None, help="Single tmux session (default: configured default_session)")

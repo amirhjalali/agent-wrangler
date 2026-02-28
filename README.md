@@ -214,6 +214,7 @@ Use this when you want a real operator grid similar to "team sessions":
 # Repo drift view (AOE-style diff/dirty awareness)
 ./scripts/agent-wrangler drift
 ./scripts/agent-wrangler drift --fleet --alert-dirty 25
+./scripts/agent-wrangler doctor --fleet --only-attention
 
 # Program orchestration (team + loops + readiness gates)
 ./scripts/agent-wrangler program init
@@ -272,6 +273,7 @@ Notes:
 - `fleet manager` creates a dedicated HQ tmux session that monitors all managed sessions in real time.
 - `fleet set` lets you pin exactly which tmux sessions count as your operating universe.
 - `drift --fleet` gives a fast per-project branch/dirty summary across active sessions.
+- `doctor --fleet --only-attention` finds red/waiting panes and prints concrete remediation actions.
 - `fleet jump` opens a fast choose-tree jump flow (inside tmux) or direct session focus.
 - `fleet jump --fzf` gives a searchable selector with attention columns (works outside tmux too).
 - `fleet popup` opens a live fleet manager view in a tmux popup for quick triage.
@@ -283,6 +285,7 @@ Notes:
 - `import` is safe by default: startup commands and agent relaunch are disabled unless you pass `--startup` and/or `--agent`.
 - `teams up` gives one command behavior: reuse existing grid if present, or build from import/bootstrap and attach.
 - `teams paint/watch/manager` sets pane borders to green/yellow/red based on attention signals (waiting/error markers/activity).
+- `teams watch` includes a top-attention triage rail with direct fix hints (missing command, port conflicts, waiting prompts).
 - In tmux, standard pane navigation is `Ctrl-b` + arrows. `teams nav` enables no-prefix navigation:
   - pane: `Option+Arrow`
   - window cycle: `Option+[` and `Option+]`
