@@ -2574,7 +2574,15 @@ def run_nav(args: argparse.Namespace) -> int:
     index_bindings: list[tuple[str, list[str]]] = []
     for idx in range(1, 10):
         index_bindings.append((f"M-{idx}", ["select-window", "-t", f":{idx - 1}"]))
-    all_bindings = pane_bindings + window_bindings + index_bindings
+    # Named window shortcuts for manager/grid workflow
+    store = load_store()
+    session = store.get("default_session") or DEFAULT_SESSION
+    named_window_bindings = [
+        ("M-m", ["select-window", "-t", f"{session}:manager"]),
+        ("M-g", ["select-window", "-t", f"{session}:grid"]),
+        ("M-t", ["select-window", "-t", f"{session}:teams"]),
+    ]
+    all_bindings = pane_bindings + window_bindings + index_bindings + named_window_bindings
 
     if args.remove:
         for key, _cmd in all_bindings:
@@ -2588,6 +2596,7 @@ def run_nav(args: argparse.Namespace) -> int:
     print("Pane navigation: Option+Arrow")
     print("Window navigation: Option+[ / Option+]")
     print("Window direct jump: Option+1..9")
+    print("Named windows: Option+m (manager) | Option+g (grid) | Option+t (teams)")
     return 0
 
 
