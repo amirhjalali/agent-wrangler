@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import curses
 import json
+import os
 import signal
 import subprocess
 import shutil
@@ -25,7 +26,7 @@ REPORTS_DIR = ROOT / "reports"
 
 LANE_ORDER = ["now", "next", "week", "later"]
 VALID_STATUSES = {"open", "done", "canceled"}
-UI_PAGES = ("overview", "admin")
+UI_PAGES = ("wrangler", "panels")
 BRAND_NAME = "Agent Wrangler"
 PRIMARY_CLI = "agent-wrangler"
 
@@ -905,6 +906,224 @@ def ui_history_lines(
     return lines[:max_rows]
 
 
+def ui_tmux_session() -> str:
+    try:
+        store = tmux_teams.load_store()
+    except Exception:
+        return tmux_teams.DEFAULT_SESSION
+    return str(store.get("default_session") or tmux_teams.DEFAULT_SESSION)
+
+
+def panel_key(panel: dict[str, Any]) -> tuple[str, int, str]:
+    return (
+        str(panel.get("project_id") or ""),
+        int(panel.get("index") or 0),
+        str(panel.get("tty") or ""),
+    )
+
+
+def panel_sort_key(panel: dict[str, Any]) -> tuple[int, int, float, str]:
+    health_rank = {"red": 0, "yellow": 1, "green": 2}.get(str(panel.get("health") or ""), 3)
+    status_rank = {"waiting": 0, "active": 1, "background": 2, "idle": 3}.get(str(panel.get("status") or ""), 9)
+    wait = float(panel.get("wait") or 0.0)
+    project = str(panel.get("project_id") or "")
+    return (health_rank, status_rank, -wait, project)
+
+
+def sorted_panels(panels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = list(panels)
+    rows.sort(key=panel_sort_key)
+    return rows
+
+
+def clamp_selected_panel_index(selected_index: int, total: int) -> int:
+    if total <= 0:
+        return 0
+    return max(0, min(selected_index, total - 1))
+
+
+def selected_panel(panels: list[dict[str, Any]], selected_index: int) -> dict[str, Any] | None:
+    if not panels:
+        return None
+    idx = clamp_selected_panel_index(selected_index, len(panels))
+    return panels[idx]
+
+
+def panels_snapshot(
+    tmux_session: str,
+    capture_lines: int,
+    wait_attention_min: int,
+    apply_colors: bool,
+) -> tuple[list[dict[str, Any]], str | None]:
+    try:
+        if not tmux_teams.session_exists(tmux_session):
+            return [], f"tmux session '{tmux_session}' not running"
+        rows = tmux_teams.refresh_pane_health(
+            session=tmux_session,
+            capture_lines=max(20, int(capture_lines)),
+            wait_attention_min=max(0, int(wait_attention_min)),
+            apply_colors=apply_colors,
+        )
+        pane_by_index = {pane.pane_index: pane for pane in tmux_teams.list_panes(tmux_session)}
+        merged: list[dict[str, Any]] = []
+        for row in rows:
+            index = int(row.get("index") or 0)
+            pane = pane_by_index.get(index)
+            item = dict(row)
+            item["pane_id"] = pane.pane_id if pane else ""
+            item["pane_path"] = pane.pane_path if pane else ""
+            item["pane_title"] = pane.pane_title if pane else ""
+            item["pane_command"] = pane.pane_command if pane else ""
+            merged.append(item)
+        return sorted_panels(merged), None
+    except Exception as exc:
+        return [], str(exc)
+
+
+def ui_panels_lines(
+    panels: list[dict[str, Any]],
+    selected_index: int,
+    line_width: int,
+    max_rows: int,
+) -> list[str]:
+    lines: list[str] = []
+    if not panels:
+        lines.append("No tmux panels found.")
+        return lines
+
+    lines.append("SEL IDX PROJECT                HLTH   ST       WAIT  AGENT")
+    for idx, panel in enumerate(panels[: max(1, max_rows - 1)]):
+        marker = ">" if idx == selected_index else " "
+        wait = panel.get("wait")
+        wait_text = f"{int(wait)}m" if wait is not None else "-"
+        row = (
+            f"{marker}  {int(panel.get('index') or 0):<3} {str(panel.get('project_id') or '-')[:22]:<22} "
+            f"{str(panel.get('health') or '-'): <6} {str(panel.get('status') or '-'): <8} "
+            f"{wait_text:<5} {str(panel.get('agent') or '-')[:8]:<8}"
+        )
+        lines.append(short_text(row, line_width))
+
+    extra = len(panels) - max(1, max_rows - 1)
+    if extra > 0:
+        lines.append(f"... and {extra} more")
+    return lines[:max_rows]
+
+
+def ui_panel_detail_lines(
+    panel: dict[str, Any] | None,
+    tmux_session: str,
+    line_width: int,
+    max_rows: int,
+) -> list[str]:
+    lines: list[str] = []
+    if not panel:
+        lines.append("No panel selected.")
+        return lines
+
+    lines.append(f"Session {tmux_session}  Pane {panel.get('pane_id') or '-'}  Index {panel.get('index')}")
+    lines.append(
+        short_text(
+            "Project {project}  Health {health}  Status {status}  Wait {wait}".format(
+                project=str(panel.get("project_id") or "-"),
+                health=str(panel.get("health") or "-"),
+                status=str(panel.get("status") or "-"),
+                wait=(f"{int(panel['wait'])}m" if panel.get("wait") is not None else "-"),
+            ),
+            line_width,
+        )
+    )
+    lines.append(
+        short_text(
+            "TTY {tty}  Agent {agent}  Reason {reason}".format(
+                tty=str(panel.get("tty") or "-"),
+                agent=str(panel.get("agent") or "-"),
+                reason=str(panel.get("reason") or "-"),
+            ),
+            line_width,
+        )
+    )
+    lines.append("")
+    lines.append(short_text(f"Path: {str(panel.get('pane_path') or '-')}", line_width))
+    lines.append(short_text(f"Cmd: {str(panel.get('pane_command') or '-')}", line_width))
+    lines.append("")
+    lines.append("Quick actions")
+    lines.append("- [enter/f] jump to panel in tmux")
+    lines.append("- [k] stop panel (Ctrl-C)")
+    lines.append("- [c] run claude   [x] run codex")
+    lines.append("- [s] send custom command")
+    lines.append("- [i] copy tty inspect command")
+    return lines[:max_rows]
+
+
+def ui_panel_channel_lines(
+    tmux_session: str,
+    panel_error: str | None,
+    ui_events: list[str],
+    line_width: int,
+    max_rows: int,
+) -> list[str]:
+    lines: list[str] = []
+    lines.append(f"Wrangler Channel (tmux={tmux_session})")
+    if panel_error:
+        lines.append(short_text(f"WARN: {panel_error}", line_width))
+    lines.append("")
+
+    if ui_events:
+        for event in ui_events[-max(1, max_rows - 3) :][::-1]:
+            lines.append(short_text(f"- {event}", line_width))
+    else:
+        lines.append("No events yet.")
+    return lines[:max_rows]
+
+
+def open_panel_in_tmux(tmux_session: str, panel: dict[str, Any] | None) -> str:
+    if not panel:
+        return "PANEL open: no selected panel"
+    token = str(panel.get("project_id") or panel.get("index") or "")
+    if not token:
+        return "PANEL open: missing token"
+    try:
+        pane = tmux_teams.pane_target(tmux_session, token)
+        code, _, err = tmux_teams.tmux(["select-pane", "-t", pane.pane_id], timeout=5)
+        if code != 0:
+            return f"PANEL open failed: {err.strip() or 'select-pane failed'}"
+        if os.environ.get("TMUX"):
+            code, _, err = tmux_teams.tmux(["switch-client", "-t", tmux_session], timeout=5)
+            if code == 0:
+                return f"PANEL open: switched to {tmux_session}:{pane.pane_id}"
+            return f"PANEL open failed: {err.strip() or 'switch-client failed'}"
+        tmux_teams.attach_session(tmux_session)
+        return f"PANEL open: attached {tmux_session}:{pane.pane_id}"
+    except Exception as exc:
+        return f"PANEL open failed: {exc}"
+
+
+def stop_panel(tmux_session: str, panel: dict[str, Any] | None) -> str:
+    if not panel:
+        return "PANEL stop: no selected panel"
+    token = str(panel.get("project_id") or panel.get("index") or "")
+    try:
+        pane = tmux_teams.pane_target(tmux_session, token)
+        tmux_teams.pane_ctrl_c(pane.pane_id)
+        return f"PANEL stop: sent Ctrl-C to {pane.pane_id} ({token})"
+    except Exception as exc:
+        return f"PANEL stop failed: {exc}"
+
+
+def send_panel_command(tmux_session: str, panel: dict[str, Any] | None, command: str) -> str:
+    if not panel:
+        return "PANEL send: no selected panel"
+    if not command.strip():
+        return "PANEL send: empty command"
+    token = str(panel.get("project_id") or panel.get("index") or "")
+    try:
+        pane = tmux_teams.pane_target(tmux_session, token)
+        tmux_teams.pane_send(pane.pane_id, command, enter=True)
+        return f"PANEL send: {token} <= {command}"
+    except Exception as exc:
+        return f"PANEL send failed: {exc}"
+
+
 def run_guard_once(source: str, max_ai_sessions: int, wait_limit_minutes: int, apply: bool) -> str:
     snapshot, _ = antfarm_snapshot(source=source, include_idle=False)
     actions = terminal_sentinel.recommend_actions(
@@ -1258,6 +1477,10 @@ def render_ui_frame(
     page: str,
     sessions: list[dict[str, Any]],
     selected_index: int,
+    panels: list[dict[str, Any]],
+    selected_panel_index: int,
+    panel_error: str | None,
+    tmux_session: str,
     ui_events: list[str],
 ) -> None:
     h, w = stdscr.getmaxyx()
@@ -1276,17 +1499,18 @@ def render_ui_frame(
     summary = snapshot.get("summary", {})
     open_cards = plan_summary(store).get("open_total", 0)
     page = page if page in UI_PAGES else UI_PAGES[0]
-    page_number = 1 if page == "overview" else 2
-    page_label = "Overview" if page == "overview" else "Session Admin"
+    page_number = 1 if page == "wrangler" else 2
+    page_label = "Wrangler" if page == "wrangler" else "Panels"
     title = (
         "AGENT WRANGLER  |  Page {page_number}/2 {page_label}  |  Source {source}  |  "
-        "Open Cards {open_cards}  |  Sessions {sessions}  |  Waiting {waiting}".format(
+        "Open Cards {open_cards}  |  Sessions {sessions}  |  Waiting {waiting}  |  Tmux {tmux_session}".format(
             page_number=page_number,
             page_label=page_label,
             source=source,
             open_cards=open_cards,
             sessions=summary.get("total", 0),
             waiting=summary.get("waiting", 0),
+            tmux_session=tmux_session,
         )
     )
     try:
@@ -1302,7 +1526,7 @@ def render_ui_frame(
 
     body_top = 1
     body_h = h - 3
-    if page == "overview":
+    if page == "wrangler":
         top_h = max(8, int(body_h * 0.45))
         bottom_h = body_h - top_h
         if bottom_h < 6:
@@ -1325,8 +1549,14 @@ def render_ui_frame(
             line_width=right_w - 3,
             max_rows=max(4, top_h - 3),
         )
-        draw_panel(stdscr, body_top, 0, top_h, left_w, "Studio Overview", studio_lines, color_pair=2)
-        draw_panel(stdscr, body_top, left_w, top_h, right_w, "Session Health", health_lines, color_pair=4)
+        panel_red = len([row for row in panels if str(row.get("health") or "") == "red"])
+        panel_waiting = len([row for row in panels if str(row.get("status") or "") == "waiting"])
+        health_lines.insert(0, f"Panels total={len(panels)} red={panel_red} waiting={panel_waiting}")
+        if panel_error:
+            health_lines.insert(1, short_text(f"WARN: {panel_error}", right_w - 3))
+
+        draw_panel(stdscr, body_top, 0, top_h, left_w, "Wrangler Overview", studio_lines, color_pair=2)
+        draw_panel(stdscr, body_top, left_w, top_h, right_w, "Runtime + Panel Health", health_lines, color_pair=4)
 
         lower_y = body_top + top_h
         queue_lines = ui_queue_lines(store=store, line_width=left_w - 3, max_rows=max(3, bottom_h - 3))
@@ -1337,10 +1567,10 @@ def render_ui_frame(
             line_width=right_w - 3,
             max_rows=max(3, bottom_h - 3),
         )
-        draw_panel(stdscr, lower_y, 0, bottom_h, left_w, "Queue", queue_lines, color_pair=3)
-        draw_panel(stdscr, lower_y, left_w, bottom_h, right_w, "History", history_lines, color_pair=5)
+        draw_panel(stdscr, lower_y, 0, bottom_h, left_w, "Wrangler Queue", queue_lines, color_pair=3)
+        draw_panel(stdscr, lower_y, left_w, bottom_h, right_w, "Wrangler Log", history_lines, color_pair=5)
 
-        footer = "[tab/2] admin page  [k] kill-oldest  [o] plan  [a] apply  [r] refresh  [q] quit"
+        footer = "[tab/2] panels  [k] kill-oldest waiting  [o] plan  [a] apply  [r] refresh  [q] quit"
         try:
             stdscr.addstr(h - 1, 0, short_text(footer, w - 1), curses.color_pair(5) | curses.A_BOLD)
         except curses.error:
@@ -1355,39 +1585,34 @@ def render_ui_frame(
         left_w = max(36, int(w * 0.46))
         right_w = w - left_w
 
-        try:
-            project_map = get_project_map()
-        except Exception:
-            project_map = {}
-
-        clamped_index = clamp_selected_index(selected_index, len(sessions))
-        admin_lines = ui_session_admin_lines(
-            sessions=sessions,
-            selected_index=clamped_index,
+        clamped_panel_index = clamp_selected_panel_index(selected_panel_index, len(panels))
+        panel_lines = ui_panels_lines(
+            panels=panels,
+            selected_index=clamped_panel_index,
             line_width=left_w - 3,
             max_rows=max(4, top_h - 3),
         )
-        detail_lines = ui_selected_detail_lines(
-            session=selected_session(sessions, clamped_index),
-            store=store,
-            project_map=project_map,
+        detail_lines = ui_panel_detail_lines(
+            panel=selected_panel(panels, clamped_panel_index),
+            tmux_session=tmux_session,
             line_width=right_w - 3,
             max_rows=max(4, top_h - 3),
         )
-        channel_lines = ui_channel_lines(
+        channel_lines = ui_panel_channel_lines(
+            tmux_session=tmux_session,
+            panel_error=panel_error,
             ui_events=ui_events,
-            suggested_actions=suggested_actions,
             line_width=w - 3,
             max_rows=max(3, channel_h - 3),
         )
 
-        draw_panel(stdscr, body_top, 0, top_h, left_w, "Session Administrator", admin_lines, color_pair=2)
-        draw_panel(stdscr, body_top, left_w, top_h, right_w, "Selected Session", detail_lines, color_pair=4)
-        draw_panel(stdscr, body_top + top_h, 0, channel_h, w, "Admin Channel", channel_lines, color_pair=3)
+        draw_panel(stdscr, body_top, 0, top_h, left_w, "Panels", panel_lines, color_pair=2)
+        draw_panel(stdscr, body_top, left_w, top_h, right_w, "Selected Panel", detail_lines, color_pair=4)
+        draw_panel(stdscr, body_top + top_h, 0, channel_h, w, "Wrangler Channel", channel_lines, color_pair=3)
 
         footer = (
-            "[tab/1] overview  [up/down] select  [k] kill  [g] open monitor  [i] inspect copy  [:] command  "
-            "[o] plan  [a] apply  [q] quit"
+            "[tab/1] wrangler  [up/down] select panel  [enter/f] jump  [s] send  [c] claude  [x] codex  "
+            "[k] stop  [i] inspect copy  [r] refresh  [q] quit"
         )
         try:
             stdscr.addstr(h - 1, 0, short_text(footer, w - 1), curses.color_pair(5) | curses.A_BOLD)
@@ -1430,7 +1655,11 @@ def run_ui(args: argparse.Namespace) -> int:
         warnings: list[str] = []
         sessions: list[dict[str, Any]] = []
         selected_index = 0
-        ui_page = "overview"
+        panels: list[dict[str, Any]] = []
+        selected_panel_index = 0
+        panel_error: str | None = None
+        tmux_session = ui_tmux_session()
+        ui_page = "wrangler"
         ui_events: list[str] = [f"{now_iso()} UI started"]
 
         def add_event(message: str) -> None:
@@ -1438,12 +1667,24 @@ def run_ui(args: argparse.Namespace) -> int:
             del ui_events[:-20]
 
         def refresh_view() -> None:
-            nonlocal snapshot, warnings, sessions, selected_index, last_tick
+            nonlocal snapshot, warnings, sessions, selected_index, panels, selected_panel_index, panel_error, tmux_session, last_tick
             selected = selected_session(sessions, selected_index)
             selected_key = session_key(selected) if selected else None
+            selected_panel_row = selected_panel(panels, selected_panel_index)
+            selected_panel_key = panel_key(selected_panel_row) if selected_panel_row else None
 
             snapshot, warnings = antfarm_snapshot(source=source, include_idle=False)
             sessions = sorted_sessions(snapshot)
+            tmux_session_local = ui_tmux_session()
+            tmux_session = tmux_session_local
+            panel_rows, panel_err = panels_snapshot(
+                tmux_session=tmux_session_local,
+                capture_lines=80,
+                wait_attention_min=1,
+                apply_colors=True,
+            )
+            panels = panel_rows
+            panel_error = panel_err
 
             if selected_key:
                 matched = False
@@ -1456,6 +1697,18 @@ def run_ui(args: argparse.Namespace) -> int:
                     selected_index = clamp_selected_index(selected_index, len(sessions))
             else:
                 selected_index = clamp_selected_index(selected_index, len(sessions))
+
+            if selected_panel_key:
+                matched = False
+                for idx, panel_row in enumerate(panels):
+                    if panel_key(panel_row) == selected_panel_key:
+                        selected_panel_index = idx
+                        matched = True
+                        break
+                if not matched:
+                    selected_panel_index = clamp_selected_panel_index(selected_panel_index, len(panels))
+            else:
+                selected_panel_index = clamp_selected_panel_index(selected_panel_index, len(panels))
 
             store_local = load_store()
             render_ui_frame(
@@ -1470,6 +1723,10 @@ def run_ui(args: argparse.Namespace) -> int:
                 page=ui_page,
                 sessions=sessions,
                 selected_index=selected_index,
+                panels=panels,
+                selected_panel_index=selected_panel_index,
+                panel_error=panel_error,
+                tmux_session=tmux_session_local,
                 ui_events=ui_events,
             )
             last_tick = time.time()
@@ -1493,25 +1750,25 @@ def run_ui(args: argparse.Namespace) -> int:
                 break
 
             if ch in (9, curses.KEY_BTAB):
-                ui_page = "admin" if ui_page == "overview" else "overview"
+                ui_page = "panels" if ui_page == "wrangler" else "wrangler"
                 add_event(f"PAGE: {ui_page}")
                 refresh_view()
                 continue
             if ch == ord("1"):
-                ui_page = "overview"
+                ui_page = "wrangler"
                 refresh_view()
                 continue
             if ch == ord("2"):
-                ui_page = "admin"
+                ui_page = "panels"
                 refresh_view()
                 continue
 
-            if ui_page == "admin" and ch in (curses.KEY_UP, ord("p"), ord("P")):
-                selected_index = clamp_selected_index(selected_index - 1, len(sessions))
+            if ui_page == "panels" and ch in (curses.KEY_UP, ord("p"), ord("P")):
+                selected_panel_index = clamp_selected_panel_index(selected_panel_index - 1, len(panels))
                 refresh_view()
                 continue
-            if ui_page == "admin" and ch in (curses.KEY_DOWN, ord("n"), ord("N"), ord("j"), ord("J")):
-                selected_index = clamp_selected_index(selected_index + 1, len(sessions))
+            if ui_page == "panels" and ch in (curses.KEY_DOWN, ord("n"), ord("N"), ord("j"), ord("J")):
+                selected_panel_index = clamp_selected_panel_index(selected_panel_index + 1, len(panels))
                 refresh_view()
                 continue
 
@@ -1520,39 +1777,72 @@ def run_ui(args: argparse.Namespace) -> int:
                 refresh_view()
                 continue
 
-            if ch in (ord("k"), ord("K")):
-                if ui_page == "admin":
-                    message = kill_specific_session(selected_session(sessions, selected_index) or {})
-                else:
-                    message = kill_oldest_waiting(source=source)
+            if ui_page == "panels" and ch in (ord("g"), ord("G"), ord("f"), ord("F"), 10, 13):
+                message = open_panel_in_tmux(tmux_session, selected_panel(panels, selected_panel_index))
                 add_event(message)
                 refresh_view()
                 continue
 
-            if ui_page == "admin" and ch in (ord("g"), ord("G"), 10, 13):
-                target = selected_session(sessions, selected_index)
-                if target:
-                    message = launch_tty_monitor(str(target.get("tty") or ""))
-                else:
-                    message = "OPEN: no selected session"
-                add_event(message)
-                refresh_view()
-                continue
-
-            if ui_page == "admin" and ch in (ord("i"), ord("I")):
-                target = selected_session(sessions, selected_index)
+            if ui_page == "panels" and ch in (ord("i"), ord("I")):
+                target = selected_panel(panels, selected_panel_index)
                 if target:
                     inspect_cmd = tty_inspect_command(str(target.get("tty") or ""))
                     copied = copy_to_clipboard(inspect_cmd)
                     suffix = " (copied)" if copied else ""
                     add_event(f"INSPECT: {inspect_cmd}{suffix}")
                 else:
-                    add_event("INSPECT: no selected session")
+                    add_event("INSPECT: no selected panel")
                 refresh_view()
                 continue
 
-            if ui_page == "admin" and ch == ord(":"):
-                cmd = prompt_command(stdscr, prompt="admin> ")
+            if ui_page == "panels" and ch in (ord("k"), ord("K")):
+                message = stop_panel(tmux_session, selected_panel(panels, selected_panel_index))
+                add_event(message)
+                refresh_view()
+                continue
+
+            if ui_page == "wrangler" and ch in (ord("k"), ord("K")):
+                message = kill_oldest_waiting(source=source)
+                add_event(message)
+                refresh_view()
+                continue
+
+            if ui_page == "panels" and ch in (ord("c"), ord("C")):
+                message = send_panel_command(
+                    tmux_session=tmux_session,
+                    panel=selected_panel(panels, selected_panel_index),
+                    command="claude",
+                )
+                add_event(message)
+                refresh_view()
+                continue
+
+            if ui_page == "panels" and ch in (ord("x"), ord("X")):
+                message = send_panel_command(
+                    tmux_session=tmux_session,
+                    panel=selected_panel(panels, selected_panel_index),
+                    command="codex",
+                )
+                add_event(message)
+                refresh_view()
+                continue
+
+            if ui_page == "panels" and ch in (ord("s"), ord("S")):
+                cmd = prompt_command(stdscr, prompt="send> ")
+                if cmd:
+                    message = send_panel_command(
+                        tmux_session=tmux_session,
+                        panel=selected_panel(panels, selected_panel_index),
+                        command=cmd,
+                    )
+                    add_event(message)
+                else:
+                    add_event("SEND canceled")
+                refresh_view()
+                continue
+
+            if ui_page == "wrangler" and ch == ord(":"):
+                cmd = prompt_command(stdscr, prompt="wrangler> ")
                 if cmd:
                     message = execute_admin_command(
                         command=cmd,
@@ -1588,6 +1878,7 @@ def run_ui(args: argparse.Namespace) -> int:
                 )
                 add_event(message)
                 refresh_view()
+                continue
 
         return 0
 
@@ -1747,8 +2038,8 @@ def run_antfarm_overnight(args: argparse.Namespace) -> int:
 def run_palette(_: argparse.Namespace) -> int:
     print("Agent Wrangler Palette")
     print(f"1. {PRIMARY_CLI} ui")
-    print("   - page switch: tab / 1 / 2")
-    print("   - admin controls: up/down, k, g, i, :")
+    print("   - page switch: tab / 1 (wrangler) / 2 (panels)")
+    print("   - panels controls: up/down, enter/f, s, c, x, k, i")
     print(f"2. {PRIMARY_CLI} dashboard")
     print(f"3. {PRIMARY_CLI} watch")
     print(f"4. {PRIMARY_CLI} gastown list --open-only --verbose")
@@ -1796,6 +2087,7 @@ def _run_ops_command(command: list[str]) -> int:
 
 def run_ops(_: argparse.Namespace) -> int:
     actions: list[tuple[str, list[str]]] = [
+        ("Open Wrangler UI (2-page command center)", ["ui"]),
         ("Start all (import + grid + manager + nav)", ["start"]),
         ("Attach grid session", ["attach"]),
         ("Show pane status", ["status"]),

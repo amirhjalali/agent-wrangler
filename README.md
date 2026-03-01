@@ -176,16 +176,19 @@ The main UI is now a lightweight command center:
 `agent-wrangler` and `termwatch` classify mixed agent sessions (`claude`, `codex`, `aider`, `gemini`) in the same Ghostty tab set.
 
 `agent-wrangler ui` keys:
-- `tab`: switch between `Overview` and `Session Admin` pages
-- `1`: go to `Overview` page
-- `2`: go to `Session Admin` page
+- `tab`: switch between `Wrangler` and `Panels` pages
+- `1`: go to `Wrangler` page
+- `2`: go to `Panels` page
 - `q`: quit
 - `r`: manual refresh
-- `k`: kill oldest waiting session (overview) / kill selected session (admin)
-- `up/down`: move selection in admin page
-- `g` or `enter`: open Ghostty monitor window for selected tty
-- `i`: copy selected tty inspect command to clipboard
-- `:`: admin command mode (`help`, `kill`, `inspect`, `open`, `plan`, `apply`)
+- `k` on `Wrangler`: kill oldest waiting session
+- `up/down` on `Panels`: move selected panel
+- `enter` or `f` on `Panels`: jump directly into selected tmux panel
+- `s` on `Panels`: send command to selected panel
+- `c` / `x` on `Panels`: launch `claude` / `codex` in selected panel
+- `k` on `Panels`: send Ctrl-C to selected panel
+- `i` on `Panels`: copy selected panel tty inspect command
+- `:` on `Wrangler`: command mode (`help`, `kill`, `inspect`, `open`, `plan`, `apply`)
 - `o`: run overnight guard in dry-run mode once
 - `a`: run overnight guard and apply actions once
 
@@ -288,7 +291,7 @@ Use this when you want a real operator grid similar to "team sessions":
 
 Single-script operations:
 - `./scripts/agent-wrangler ops`
-- Then choose actions by number (start, attach, focus pane, send command, launch agent, manager, jump, doctor, persistence, profile, program status).
+- Then choose actions by number (open 2-page UI, start, attach, focus pane, send command, launch agent, manager, jump, doctor, persistence, profile, program status).
 
 Notes:
 - `hq` is a thin shortcut for `agent-wrangler up`.
