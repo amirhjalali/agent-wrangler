@@ -22,6 +22,15 @@ from tmux_teams import (
     session_exists,
     tmux,
 )
+from session_stats import (
+    cheap_stats_for_pane,
+    format_stats_summary,
+    load_stats,
+    poll_usage_for_pane,
+    save_stats,
+    should_poll,
+    update_session_stats,
+)
 
 # ---------------------------------------------------------------------------
 # Color pair IDs
@@ -57,10 +66,10 @@ def _health_color(health: str) -> int:
     return curses.color_pair(PAIR_DEFAULT)
 
 
-def _fetch_rows(session: str) -> list[dict[str, Any]]:
-    """Refresh pane health and return row dicts."""
+def _fetch_rows(session: str, stats_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Refresh pane health, collect stats, return row dicts."""
     try:
-        return refresh_pane_health(
+        rows = refresh_pane_health(
             session=session,
             capture_lines=40,
             wait_attention_min=1,
@@ -68,6 +77,31 @@ def _fetch_rows(session: str) -> list[dict[str, Any]]:
         )
     except Exception:
         return []
+
+    # Cheap stats for every pane
+    for row in rows:
+        pid = str(row.get("pane_id") or "")
+        proj = str(row.get("project_id") or "")
+        if pid and proj:
+            cheap = cheap_stats_for_pane(pid, tmux)
+            update_session_stats(pid, proj, cheap, None, stats_data)
+
+    # Periodic /usage poll: one idle claude session per cycle
+    if should_poll(stats_data):
+        for row in rows:
+            is_waiting = str(row.get("status") or "") == "waiting"
+            is_claude = str(row.get("ai_tool") or row.get("agent") or "") == "claude"
+            if is_waiting and is_claude:
+                pid = str(row.get("pane_id") or "")
+                proj = str(row.get("project_id") or "")
+                if pid and proj:
+                    usage = poll_usage_for_pane(pid, tmux)
+                    if usage:
+                        update_session_stats(pid, proj, None, usage, stats_data)
+                break  # Only one per cycle
+
+    save_stats(stats_data)
+    return rows
 
 
 def _format_row(row: dict[str, Any], selected: bool, width: int) -> tuple[str, int]:
@@ -93,7 +127,8 @@ def grid_main(stdscr: Any, session: str, interval: int, manager_window: str) -> 
     stdscr.nodelay(False)
     stdscr.timeout(interval * 1000)
 
-    rows: list[dict[str, Any]] = _fetch_rows(session)
+    stats_data = load_stats()
+    rows: list[dict[str, Any]] = _fetch_rows(session, stats_data)
     selected = 0
     last_refresh = time.monotonic()
 
@@ -119,9 +154,18 @@ def grid_main(stdscr: Any, session: str, interval: int, manager_window: str) -> 
         except curses.error:
             pass
 
-        # --- Pane list (rows 2 .. max_y-2) ---
-        list_start = 2
-        list_height = max(1, max_y - 3)  # between title and footer
+        # --- Stats header (row 1) ---
+        stats_line = " " + format_stats_summary(rows, stats_data)
+        if len(stats_line) > max_x:
+            stats_line = stats_line[:max_x]
+        try:
+            stdscr.addnstr(1, 0, stats_line, max_x, curses.color_pair(PAIR_TITLE))
+        except curses.error:
+            pass
+
+        # --- Pane list (rows 3 .. max_y-2) ---
+        list_start = 3
+        list_height = max(1, max_y - 4)
 
         # Scrolling: ensure selected is visible
         if len(rows) > 0:
@@ -155,7 +199,7 @@ def grid_main(stdscr: Any, session: str, interval: int, manager_window: str) -> 
         if key == -1:
             now = time.monotonic()
             if now - last_refresh >= interval:
-                rows = _fetch_rows(session)
+                rows = _fetch_rows(session, stats_data)
                 last_refresh = now
             continue
 
@@ -232,7 +276,7 @@ def grid_main(stdscr: Any, session: str, interval: int, manager_window: str) -> 
 
         # Manual refresh
         if key == ord("r"):
-            rows = _fetch_rows(session)
+            rows = _fetch_rows(session, stats_data)
             last_refresh = time.monotonic()
             continue
 
