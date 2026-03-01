@@ -42,19 +42,19 @@ if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 Agent Wrangler shortcuts:
   start
-    -> routed to: teams up --rebuild --mode import --preserve-duplicates --startup --agent --nav --manager --manager-replace
+    -> Manager (Claude Code + status rail) + Grid Navigator + project panes
+  grid
+    -> Standalone grid navigator (curses pane browser)
+  ops
+    -> Interactive operator console (numbered menu)
   up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail
     -> routed to: teams <command>
   fleet ...
     -> routed to: teams fleet ...
   program ...
     -> routed to: program_orchestrator.py
-  ops
-    -> routed to: command_center.py ops (interactive operator console)
-  grid
-    -> routed to: grid_navigator.py (curses pane browser)
   overview
-    -> routed to: ui
+    -> routed to: ui (deprecated, use start instead)
 
 Examples:
   ./scripts/agent-wrangler ops

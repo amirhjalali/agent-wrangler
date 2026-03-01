@@ -1623,6 +1623,8 @@ def render_ui_frame(
 
 
 def run_ui(args: argparse.Namespace) -> int:
+    print("NOTE: 'ui' is deprecated. Use 'agent-wrangler start' for the new manager + grid experience.")
+    print("Starting legacy UI...\n")
     store = load_store()
     settings = store.get("settings", {}).get("antfarm", {})
     source = args.source or settings.get("source", "ghostty")
