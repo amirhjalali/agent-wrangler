@@ -1238,11 +1238,7 @@ def run_up(args: argparse.Namespace) -> int:
                 session=session,
                 window=args.manager_window,
                 interval=args.manager_interval,
-                capture_lines=80,
-                wait_attention_min=1,
                 replace=args.manager_replace,
-                no_colorize=False,
-                ui=bool(getattr(args, "manager_ui", True)),
                 focus=True,
                 attach=False,
             )
@@ -1475,38 +1471,50 @@ def run_manager(args: argparse.Namespace) -> int:
                 raise ValueError(err.strip() or f"failed to replace manager window '{window}'")
         else:
             print(f"Manager window '{window}' already exists.")
+            if args.focus:
+                tmux(["select-window", "-t", f"{session}:{window}"], timeout=5)
+            if getattr(args, "attach", False):
+                return attach_session(session)
+            return 0
+
     if not manager_window_exists(session, window):
-        if args.ui:
-            ui_script = ROOT / "scripts" / "command_center.py"
-            cmd = (
-                f"python3 {shlex.quote(str(ui_script))} ui "
-                f"--source all --interval {max(1, int(args.interval))}"
-            )
-        else:
-            script = Path(__file__).resolve()
-            cmd = (
-                f"python3 {shlex.quote(str(script))} teams watch --session {shlex.quote(session)} "
-                f"--interval {max(1, int(args.interval))} --capture-lines {max(20, int(args.capture_lines))} "
-                f"--wait-attention-min {max(0, int(args.wait_attention_min))}"
-            )
-            if args.no_colorize:
-                cmd += " --no-colorize"
-        shell_tail = "; EXIT_CODE=$?; echo manager_exited:$EXIT_CODE; exec zsh"
-        shell_command = "zsh -lc " + shlex.quote(cmd + shell_tail)
+        # Create manager window with Claude Code
+        wrangler_root = str(ROOT)
+        claude_cmd = "claude"
+        shell_tail = "; exec zsh"
+        shell_command = "zsh -lc " + shlex.quote(claude_cmd + shell_tail)
         code, _, err = tmux(
-            ["new-window", "-d", "-t", session, "-n", window, "-c", str(ROOT), shell_command],
+            ["new-window", "-d", "-t", session, "-n", window, "-c", wrangler_root, shell_command],
             timeout=8,
         )
         if code != 0:
             raise ValueError(err.strip() or f"failed to create manager window '{window}'")
+
+        # Split right pane for status rail (~25% width)
+        rail_script = ROOT / "scripts" / "tmux_teams.py"
+        rail_cmd = (
+            f"python3 {shlex.quote(str(rail_script))} teams rail "
+            f"--session {shlex.quote(session)} --interval {max(1, int(args.interval))}"
+        )
+        rail_shell = "zsh -lc " + shlex.quote(rail_cmd + shell_tail)
+        code, _, err = tmux(
+            ["split-window", "-h", "-t", f"{session}:{window}", "-l", "25%",
+             "-c", wrangler_root, rail_shell],
+            timeout=8,
+        )
+        if code != 0:
+            print(f"Warning: failed to create status rail split: {err.strip()}")
+
+        # Focus the left pane (Claude Code) within the manager window
+        tmux(["select-pane", "-t", f"{session}:{window}.0"], timeout=5)
+
         if not manager_window_exists(session, window):
             raise ValueError(f"manager window '{window}' did not persist")
-        mode = "ui" if args.ui else "watch"
-        print(f"Manager window started: {session}:{window} ({mode})")
+        print(f"Manager window started: {session}:{window} (claude + rail)")
 
     if args.focus:
         tmux(["select-window", "-t", f"{session}:{window}"], timeout=5)
-    if args.attach:
+    if getattr(args, "attach", False):
         return attach_session(session)
     return 0
 
@@ -2749,19 +2757,6 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     up.add_argument("--manager-window", default="manager")
     up.add_argument("--manager-interval", type=int, default=3)
     up.add_argument("--manager-replace", action="store_true")
-    up.add_argument(
-        "--manager-ui",
-        dest="manager_ui",
-        action="store_true",
-        default=True,
-        help="Run manager window in 2-page Wrangler UI mode (default)",
-    )
-    up.add_argument(
-        "--manager-watch",
-        dest="manager_ui",
-        action="store_false",
-        help="Run manager window in classic watch-table mode",
-    )
     up.add_argument("--status", action="store_true", default=True, help="Print status before attach (default true)")
     up.add_argument("--no-status", dest="status", action="store_false", help="Skip status output")
     up.add_argument("--attach", action="store_true", default=True, help="Attach to session (default true)")
@@ -2833,12 +2828,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     manager.add_argument("--session", default=None)
     manager.add_argument("--window", default="manager")
     manager.add_argument("--interval", type=int, default=3)
-    manager.add_argument("--capture-lines", type=int, default=80)
-    manager.add_argument("--wait-attention-min", type=int, default=1)
     manager.add_argument("--replace", action="store_true", help="Replace existing manager window")
-    manager.add_argument("--no-colorize", action="store_true")
-    manager.add_argument("--ui", dest="ui", action="store_true", default=True, help="Run 2-page Wrangler UI (default)")
-    manager.add_argument("--watch", dest="ui", action="store_false", help="Run classic watch table")
     manager.add_argument("--focus", action="store_true", default=True, help="Focus manager window (default true)")
     manager.add_argument("--no-focus", dest="focus", action="store_false")
     manager.add_argument("--attach", action="store_true", default=True, help="Attach session (default true)")
