@@ -1242,6 +1242,7 @@ def run_up(args: argparse.Namespace) -> int:
                 wait_attention_min=1,
                 replace=args.manager_replace,
                 no_colorize=False,
+                ui=bool(getattr(args, "manager_ui", True)),
                 focus=True,
                 attach=False,
             )
@@ -1408,14 +1409,21 @@ def run_manager(args: argparse.Namespace) -> int:
         else:
             print(f"Manager window '{window}' already exists.")
     if not manager_window_exists(session, window):
-        script = Path(__file__).resolve()
-        cmd = (
-            f"python3 {shlex.quote(str(script))} teams watch --session {shlex.quote(session)} "
-            f"--interval {max(1, int(args.interval))} --capture-lines {max(20, int(args.capture_lines))} "
-            f"--wait-attention-min {max(0, int(args.wait_attention_min))}"
-        )
-        if args.no_colorize:
-            cmd += " --no-colorize"
+        if args.ui:
+            ui_script = ROOT / "scripts" / "command_center.py"
+            cmd = (
+                f"python3 {shlex.quote(str(ui_script))} ui "
+                f"--source all --interval {max(1, int(args.interval))}"
+            )
+        else:
+            script = Path(__file__).resolve()
+            cmd = (
+                f"python3 {shlex.quote(str(script))} teams watch --session {shlex.quote(session)} "
+                f"--interval {max(1, int(args.interval))} --capture-lines {max(20, int(args.capture_lines))} "
+                f"--wait-attention-min {max(0, int(args.wait_attention_min))}"
+            )
+            if args.no_colorize:
+                cmd += " --no-colorize"
         shell_tail = "; EXIT_CODE=$?; echo manager_exited:$EXIT_CODE; exec zsh"
         shell_command = "zsh -lc " + shlex.quote(cmd + shell_tail)
         code, _, err = tmux(
@@ -1426,7 +1434,8 @@ def run_manager(args: argparse.Namespace) -> int:
             raise ValueError(err.strip() or f"failed to create manager window '{window}'")
         if not manager_window_exists(session, window):
             raise ValueError(f"manager window '{window}' did not persist")
-        print(f"Manager window started: {session}:{window}")
+        mode = "ui" if args.ui else "watch"
+        print(f"Manager window started: {session}:{window} ({mode})")
 
     if args.focus:
         tmux(["select-window", "-t", f"{session}:{window}"], timeout=5)
@@ -2673,6 +2682,19 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     up.add_argument("--manager-window", default="manager")
     up.add_argument("--manager-interval", type=int, default=3)
     up.add_argument("--manager-replace", action="store_true")
+    up.add_argument(
+        "--manager-ui",
+        dest="manager_ui",
+        action="store_true",
+        default=True,
+        help="Run manager window in 2-page Wrangler UI mode (default)",
+    )
+    up.add_argument(
+        "--manager-watch",
+        dest="manager_ui",
+        action="store_false",
+        help="Run manager window in classic watch-table mode",
+    )
     up.add_argument("--status", action="store_true", default=True, help="Print status before attach (default true)")
     up.add_argument("--no-status", dest="status", action="store_false", help="Skip status output")
     up.add_argument("--attach", action="store_true", default=True, help="Attach to session (default true)")
@@ -2743,6 +2765,8 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     manager.add_argument("--wait-attention-min", type=int, default=1)
     manager.add_argument("--replace", action="store_true", help="Replace existing manager window")
     manager.add_argument("--no-colorize", action="store_true")
+    manager.add_argument("--ui", dest="ui", action="store_true", default=True, help="Run 2-page Wrangler UI (default)")
+    manager.add_argument("--watch", dest="ui", action="store_false", help="Run classic watch table")
     manager.add_argument("--focus", action="store_true", default=True, help="Focus manager window (default true)")
     manager.add_argument("--no-focus", dest="focus", action="store_false")
     manager.add_argument("--attach", action="store_true", default=True, help="Attach session (default true)")

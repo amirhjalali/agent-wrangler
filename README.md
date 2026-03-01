@@ -177,6 +177,8 @@ The main UI is now a lightweight command center:
 
 `agent-wrangler ui` keys:
 - `tab`: switch between `Wrangler` and `Panels` pages
+- `left` or `w`: go to `Wrangler` page
+- `right` or `p`: go to `Panels` page
 - `1`: go to `Wrangler` page
 - `2`: go to `Panels` page
 - `q`: quit
@@ -206,7 +208,7 @@ Use this when you want a real operator grid similar to "team sessions":
 ./scripts/agent-wrangler up --rebuild --mode import --preserve-duplicates --max-panes 10
 
 # Manager/orchestrator screen + health coloring
-./scripts/agent-wrangler manager --replace
+./scripts/agent-wrangler manager --replace --ui
 ./scripts/agent-wrangler paint
 ./scripts/agent-wrangler watch --interval 3
 
@@ -296,7 +298,7 @@ Single-script operations:
 Notes:
 - `hq` is a thin shortcut for `agent-wrangler up`.
 - `cc` and `teams` are still available as legacy aliases.
-- `agent-wrangler start` is the default startup command: Ghostty import + startup commands + detected agents + nav + manager.
+- `agent-wrangler start` is the default startup command: Ghostty import + startup commands + detected agents + nav + manager UI window.
 - `start` and `up --mode import` can preserve duplicate project sessions (`--preserve-duplicates`) so multiple Ghostty tabs in one repo stay as separate panes.
 - `fleet manager` creates a dedicated HQ tmux session that monitors all managed sessions in real time.
 - `fleet set` lets you pin exactly which tmux sessions count as your operating universe.

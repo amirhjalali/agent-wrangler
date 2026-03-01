@@ -1570,7 +1570,7 @@ def render_ui_frame(
         draw_panel(stdscr, lower_y, 0, bottom_h, left_w, "Wrangler Queue", queue_lines, color_pair=3)
         draw_panel(stdscr, lower_y, left_w, bottom_h, right_w, "Wrangler Log", history_lines, color_pair=5)
 
-        footer = "[tab/2] panels  [k] kill-oldest waiting  [o] plan  [a] apply  [r] refresh  [q] quit"
+        footer = "[tab/right/p/2] panels  [k] kill-oldest waiting  [o] plan  [a] apply  [r] refresh  [q] quit"
         try:
             stdscr.addstr(h - 1, 0, short_text(footer, w - 1), curses.color_pair(5) | curses.A_BOLD)
         except curses.error:
@@ -1611,7 +1611,7 @@ def render_ui_frame(
         draw_panel(stdscr, body_top + top_h, 0, channel_h, w, "Wrangler Channel", channel_lines, color_pair=3)
 
         footer = (
-            "[tab/1] wrangler  [up/down] select panel  [enter/f] jump  [s] send  [c] claude  [x] codex  "
+            "[tab/left/w/1] wrangler  [up/down] select panel  [enter/f] jump  [s] send  [c] claude  [x] codex  "
             "[k] stop  [i] inspect copy  [r] refresh  [q] quit"
         )
         try:
@@ -1754,6 +1754,14 @@ def run_ui(args: argparse.Namespace) -> int:
                 add_event(f"PAGE: {ui_page}")
                 refresh_view()
                 continue
+            if ch in (curses.KEY_LEFT, ord("w"), ord("W")):
+                ui_page = "wrangler"
+                refresh_view()
+                continue
+            if ch in (curses.KEY_RIGHT, ord("p"), ord("P")):
+                ui_page = "panels"
+                refresh_view()
+                continue
             if ch == ord("1"):
                 ui_page = "wrangler"
                 refresh_view()
@@ -1763,7 +1771,7 @@ def run_ui(args: argparse.Namespace) -> int:
                 refresh_view()
                 continue
 
-            if ui_page == "panels" and ch in (curses.KEY_UP, ord("p"), ord("P")):
+            if ui_page == "panels" and ch in (curses.KEY_UP,):
                 selected_panel_index = clamp_selected_panel_index(selected_panel_index - 1, len(panels))
                 refresh_view()
                 continue
@@ -2038,7 +2046,7 @@ def run_antfarm_overnight(args: argparse.Namespace) -> int:
 def run_palette(_: argparse.Namespace) -> int:
     print("Agent Wrangler Palette")
     print(f"1. {PRIMARY_CLI} ui")
-    print("   - page switch: tab / 1 (wrangler) / 2 (panels)")
+    print("   - page switch: tab / left/w/1 (wrangler) / right/p/2 (panels)")
     print("   - panels controls: up/down, enter/f, s, c, x, k, i")
     print(f"2. {PRIMARY_CLI} dashboard")
     print(f"3. {PRIMARY_CLI} watch")
