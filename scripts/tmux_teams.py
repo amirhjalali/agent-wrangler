@@ -1281,6 +1281,73 @@ def run_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_rail(args: argparse.Namespace) -> int:
+    """Auto-refreshing compact status rail for a narrow tmux split."""
+    import time as _time
+
+    ensure_tmux()
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    interval = max(1, int(args.interval))
+
+    while True:
+        if not session_exists(session):
+            print(f"Session '{session}' not found.")
+            _time.sleep(interval)
+            continue
+
+        rows = refresh_pane_health(
+            session=session,
+            capture_lines=40,
+            wait_attention_min=1,
+            apply_colors=False,
+        )
+
+        lines: list[str] = []
+        lines.append("\033[2J\033[H")  # clear screen
+        lines.append("\033[1;36m STATUS RAIL\033[0m")
+        lines.append("\033[2m" + "─" * 30 + "\033[0m")
+
+        counts = {"green": 0, "yellow": 0, "red": 0, "total": 0}
+        waiting = 0
+        for row in rows:
+            counts["total"] += 1
+            health = str(row.get("health") or "green")
+            counts[health] = counts.get(health, 0) + 1
+            status = str(row.get("status") or "idle")
+            if status == "waiting":
+                waiting += 1
+
+            dot_color = {"green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m"}.get(health, "\033[0m")
+            agent = str(row.get("agent") or row.get("ai_tool") or "")
+            project = str(row.get("project_id") or row.get("pane_title") or "?")
+            if len(project) > 16:
+                project = project[:15] + "~"
+            agent_label = f"  {agent}" if agent else ""
+            status_label = status if status != "idle" else ""
+
+            line = f" {dot_color}●\033[0m {project:<16}{agent_label}"
+            if status_label:
+                line += f"  \033[2m{status_label}\033[0m"
+            lines.append(line)
+
+        lines.append("\033[2m" + "─" * 30 + "\033[0m")
+        lines.append(f" {counts['total']} panes  {waiting} waiting")
+        lines.append(
+            f" \033[32m{counts['green']}g\033[0m "
+            f"\033[33m{counts['yellow']}y\033[0m "
+            f"\033[31m{counts['red']}r\033[0m"
+        )
+
+        print("\n".join(lines), flush=True)
+
+        try:
+            _time.sleep(interval)
+        except KeyboardInterrupt:
+            break
+    return 0
+
+
 def run_paint(args: argparse.Namespace) -> int:
     ensure_tmux()
     store = load_store()
@@ -2739,6 +2806,11 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     status = teams_sub.add_parser("status", help="Show pane grid with per-pane status")
     status.add_argument("--session", default=None)
     status.set_defaults(handler=run_status)
+
+    rail = teams_sub.add_parser("rail", help="Compact auto-refreshing status rail for narrow split panes")
+    rail.add_argument("--session", default=None)
+    rail.add_argument("--interval", type=int, default=5)
+    rail.set_defaults(handler=run_rail)
 
     paint = teams_sub.add_parser("paint", help="Color panes by attention state (green/red)")
     paint.add_argument("--session", default=None)

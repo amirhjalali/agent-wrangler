@@ -43,7 +43,7 @@ if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Agent Wrangler shortcuts:
   start
     -> routed to: teams up --rebuild --mode import --preserve-duplicates --startup --agent --nav --manager --manager-ui --manager-replace
-  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift
+  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail
     -> routed to: teams <command>
   fleet ...
     -> routed to: teams fleet ...
@@ -76,7 +76,7 @@ case "${1:-}" in
     MAX_PANES="$(resolve_max_panes)"
     set -- teams up --rebuild --mode import --preserve-duplicates --max-panes "$MAX_PANES" --startup --agent --nav --manager --manager-ui --manager-replace "$@"
     ;;
-  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift)
+  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail)
     set -- teams "$@"
     ;;
   fleet)
