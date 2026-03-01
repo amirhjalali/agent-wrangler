@@ -1244,6 +1244,22 @@ def run_up(args: argparse.Namespace) -> int:
             )
         )
 
+        # Create grid navigator window
+        grid_script = ROOT / "scripts" / "grid_navigator.py"
+        grid_cmd = (
+            f"python3 {shlex.quote(str(grid_script))} "
+            f"--session {shlex.quote(session)} --interval 5 "
+            f"--manager-window {shlex.quote(args.manager_window)}"
+        )
+        grid_shell_tail = "; exec zsh"
+        grid_shell = "zsh -lc " + shlex.quote(grid_cmd + grid_shell_tail)
+        grid_window = "grid"
+        if not manager_window_exists(session, grid_window):
+            tmux(
+                ["new-window", "-d", "-t", session, "-n", grid_window, "-c", str(ROOT), grid_shell],
+                timeout=8,
+            )
+
     show_status = bool(getattr(args, "status", True))
     attach = bool(getattr(args, "attach", True))
 

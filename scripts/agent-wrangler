@@ -51,6 +51,8 @@ Agent Wrangler shortcuts:
     -> routed to: program_orchestrator.py
   ops
     -> routed to: command_center.py ops (interactive operator console)
+  grid
+    -> routed to: grid_navigator.py (curses pane browser)
   overview
     -> routed to: ui
 
@@ -89,6 +91,10 @@ case "${1:-}" in
   overview)
     shift
     set -- ui "$@"
+    ;;
+  grid)
+    shift
+    exec python3 "$SCRIPT_DIR/grid_navigator.py" "$@"
     ;;
 esac
 
