@@ -72,6 +72,7 @@ fi
 case "${1:-}" in
   start)
     shift
+    bash "$SCRIPT_DIR/welcome_banner.sh"
     MAX_PANES="$(resolve_max_panes)"
     set -- teams up --rebuild --mode import --preserve-duplicates --max-panes "$MAX_PANES" --startup --agent --nav --manager --manager-ui --manager-replace "$@"
     ;;
