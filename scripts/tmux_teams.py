@@ -2567,6 +2567,7 @@ def run_list_projects(args: argparse.Namespace) -> int:
 
 PROJECTS_CONFIG = ROOT / "config" / "projects.json"
 NOTIFY_STATE_PATH = ROOT / ".state" / "health_state.json"
+NOTIFY_APP_PATH = ROOT / "assets" / "AgentWrangler.app"
 NOTIFY_COOLDOWN_SEC = 120  # Minimum seconds between notifications
 NOTIFY_DEBOUNCE = 2  # Pane must stay in new state for N checks before notifying
 
@@ -2590,26 +2591,40 @@ def _save_health_state(state: dict[str, Any]) -> None:
         pass
 
 
-def _notify_desktop(title: str, message: str) -> None:
-    """Send a macOS desktop notification. Uses terminal-notifier if available for custom icon."""
+def _notifications_enabled() -> bool:
+    """Check if notifications are enabled. Off by default.
+
+    Enable via: "notifications": true in team_grid.json, or AW_NOTIFY=1 env var.
+    """
+    if os.environ.get("AW_NOTIFY", "").strip() in ("1", "true", "yes"):
+        return True
     try:
-        tn = shutil.which("terminal-notifier")
-        if tn:
-            icon_path = ROOT / "assets" / "icon.png"
-            cmd = [tn, "-title", title, "-message", message,
-                   "-sound", "Ping", "-group", "agent-wrangler"]
-            if icon_path.exists():
-                cmd.extend(["-appIcon", str(icon_path)])
-            subprocess.run(cmd, timeout=5, check=False, capture_output=True)
+        store = load_store()
+        return bool(store.get("notifications", False))
+    except Exception:
+        return False
+
+
+def _notify_desktop(title: str, message: str) -> None:
+    """Send a macOS desktop notification via AgentWrangler.app (cowboy hat icon)."""
+    try:
+        if NOTIFY_APP_PATH.is_dir():
+            # Use the bundled .app — shows cowboy hat icon
+            Path("/tmp/aw_notify.txt").write_text(f"{title}\n{message}")
+            subprocess.run(
+                ["open", "-g", "-n", str(NOTIFY_APP_PATH)],
+                timeout=5, check=False, capture_output=True,
+            )
         else:
+            # Fallback to plain osascript
+            safe_msg = message.replace('"', '\\"')
+            safe_title = title.replace('"', '\\"')
             subprocess.run(
                 [
                     "osascript", "-e",
-                    f'display notification "{message}" with title "{title}" sound name "Ping"',
+                    f'display notification "{safe_msg}" with title "{safe_title}" sound name "Ping"',
                 ],
-                timeout=5,
-                check=False,
-                capture_output=True,
+                timeout=5, check=False, capture_output=True,
             )
     except Exception:
         pass
@@ -2618,10 +2633,15 @@ def _notify_desktop(title: str, message: str) -> None:
 def check_and_notify(rows: list[dict[str, Any]]) -> None:
     """Compare health state, send desktop notifications on confirmed error transitions.
 
+    Notifications are off by default. Enable with "notifications": true in team_grid.json
+    or pass --notify to paint/watch commands.
+
     Debounce: a pane must stay red for NOTIFY_DEBOUNCE consecutive checks before
     alerting. Same for recovery. Waiting states are never notified. Cooldown prevents
     rapid-fire notifications.
     """
+    if not _notifications_enabled():
+        return
     state = _load_health_state()
     prev_levels = state.get("levels", {})
     streaks: dict[str, int] = state.get("streaks", {})

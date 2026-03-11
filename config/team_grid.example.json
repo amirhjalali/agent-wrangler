@@ -6,6 +6,7 @@
     "api-server",
     "side-project"
   ],
+  "notifications": false,
   "persistence": {
     "enabled": false,
     "autosave_minutes": 15
