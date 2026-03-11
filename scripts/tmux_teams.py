@@ -1473,8 +1473,8 @@ def run_rail(args: argparse.Namespace) -> int:
         rows = refresh_pane_health(
             session=session,
             capture_lines=40,
-            wait_attention_min=1,
-    
+            wait_attention_min=5,
+
         )
 
         lines: list[str] = []
@@ -2567,10 +2567,12 @@ def run_list_projects(args: argparse.Namespace) -> int:
 
 PROJECTS_CONFIG = ROOT / "config" / "projects.json"
 NOTIFY_STATE_PATH = ROOT / ".state" / "health_state.json"
+NOTIFY_COOLDOWN_SEC = 120  # Minimum seconds between notifications
+NOTIFY_DEBOUNCE = 2  # Pane must stay in new state for N checks before notifying
 
 
-def _load_health_state() -> dict[str, str]:
-    """Load previous pane health levels from state file."""
+def _load_health_state() -> dict[str, Any]:
+    """Load previous pane health levels, streak counts, and last notify time."""
     try:
         if NOTIFY_STATE_PATH.exists():
             return json.loads(NOTIFY_STATE_PATH.read_text(encoding="utf-8"))
@@ -2579,7 +2581,7 @@ def _load_health_state() -> dict[str, str]:
     return {}
 
 
-def _save_health_state(state: dict[str, str]) -> None:
+def _save_health_state(state: dict[str, Any]) -> None:
     """Persist current pane health levels for change detection."""
     try:
         NOTIFY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2589,43 +2591,88 @@ def _save_health_state(state: dict[str, str]) -> None:
 
 
 def _notify_desktop(title: str, message: str) -> None:
-    """Send a macOS desktop notification."""
+    """Send a macOS desktop notification. Uses terminal-notifier if available for custom icon."""
     try:
-        subprocess.run(
-            [
-                "osascript", "-e",
-                f'display notification "{message}" with title "{title}" sound name "Ping"',
-            ],
-            timeout=5,
-            check=False,
-            capture_output=True,
-        )
+        tn = shutil.which("terminal-notifier")
+        if tn:
+            icon_path = ROOT / "assets" / "icon.png"
+            cmd = [tn, "-title", title, "-message", message,
+                   "-sound", "Ping", "-group", "agent-wrangler"]
+            if icon_path.exists():
+                cmd.extend(["-appIcon", str(icon_path)])
+            subprocess.run(cmd, timeout=5, check=False, capture_output=True)
+        else:
+            subprocess.run(
+                [
+                    "osascript", "-e",
+                    f'display notification "{message}" with title "{title}" sound name "Ping"',
+                ],
+                timeout=5,
+                check=False,
+                capture_output=True,
+            )
     except Exception:
         pass
 
 
 def check_and_notify(rows: list[dict[str, Any]]) -> None:
-    """Compare health state, send desktop notifications on transitions."""
-    prev = _load_health_state()
+    """Compare health state, send desktop notifications on confirmed error transitions.
+
+    Debounce: a pane must stay red for NOTIFY_DEBOUNCE consecutive checks before
+    alerting. Same for recovery. Waiting states are never notified. Cooldown prevents
+    rapid-fire notifications.
+    """
+    state = _load_health_state()
+    prev_levels = state.get("levels", {})
+    streaks: dict[str, int] = state.get("streaks", {})
+    notified: dict[str, str] = state.get("notified", {})
+    last_notify = float(state.get("last_notify", 0))
     current: dict[str, str] = {}
     alerts: list[str] = []
 
     for row in rows:
         key = str(row.get("project_id") or row.get("pane_id") or "")
         level = str(row.get("health") or "green")
+        reason = str(row.get("reason") or "")
         current[key] = level
 
-        prev_level = prev.get(key)
-        if prev_level and prev_level != "red" and level == "red":
-            reason = str(row.get("reason") or "needs attention")
-            alerts.append(f"{key}: {reason}")
-        elif prev_level == "red" and level == "green":
+        prev_level = prev_levels.get(key, level)
+
+        # Skip waiting states entirely — not worth notifying
+        if reason.startswith("waiting"):
+            streaks[key] = 0
+            continue
+
+        # Track consecutive checks at same level
+        if level == prev_level:
+            streaks[key] = streaks.get(key, 0) + 1
+        else:
+            streaks[key] = 1
+
+        # Only alert after NOTIFY_DEBOUNCE consecutive checks in new state
+        if streaks.get(key, 0) < NOTIFY_DEBOUNCE:
+            continue
+
+        last_notified_level = notified.get(key)
+        if level == "red" and last_notified_level != "red":
+            alerts.append(f"{key}: {reason or 'needs attention'}")
+            notified[key] = "red"
+        elif level == "green" and last_notified_level == "red":
             alerts.append(f"{key}: recovered")
+            notified[key] = "green"
 
-    _save_health_state(current)
+    now = time.time()
+    new_state: dict[str, Any] = {
+        "levels": current,
+        "streaks": streaks,
+        "notified": notified,
+        "last_notify": last_notify,
+    }
+    if alerts and (now - last_notify) >= NOTIFY_COOLDOWN_SEC:
+        _notify_desktop("Agent Wrangler", "\n".join(alerts[:3]))
+        new_state["last_notify"] = now
 
-    if alerts:
-        _notify_desktop("Agent Wrangler", "\n".join(alerts[:5]))
+    _save_health_state(new_state)
 
 
 def run_init(_: argparse.Namespace) -> int:
@@ -2879,7 +2926,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     paint = teams_sub.add_parser("paint", help="Color panes by attention state (green/red)")
     paint.add_argument("--session", default=None)
     paint.add_argument("--capture-lines", type=int, default=80, help="Recent lines to inspect for error markers")
-    paint.add_argument("--wait-attention-min", type=int, default=1, help="Waiting minutes before marking red")
+    paint.add_argument("--wait-attention-min", type=int, default=5, help="Waiting minutes before marking red")
     paint.add_argument("--no-colorize", action="store_true", help="Compute health only, do not set pane colors")
     paint.set_defaults(handler=run_paint)
 
@@ -2888,7 +2935,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     watch.add_argument("--interval", type=int, default=3)
     watch.add_argument("--iterations", type=int, default=0, help="0 means infinite")
     watch.add_argument("--capture-lines", type=int, default=80)
-    watch.add_argument("--wait-attention-min", type=int, default=1)
+    watch.add_argument("--wait-attention-min", type=int, default=5)
     watch.add_argument("--no-colorize", action="store_true")
     watch.add_argument("--no-clear", action="store_true")
     watch.set_defaults(handler=run_watch)
@@ -3050,7 +3097,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     hooks_enable = hooks_sub.add_parser("enable", help="Enable hooks for a session")
     hooks_enable.add_argument("--session", default=None)
     hooks_enable.add_argument("--capture-lines", type=int, default=80)
-    hooks_enable.add_argument("--wait-attention-min", type=int, default=1)
+    hooks_enable.add_argument("--wait-attention-min", type=int, default=5)
     hooks_enable.set_defaults(handler=run_hooks_enable)
 
     hooks_disable = hooks_sub.add_parser("disable", help="Disable hooks for a session")
@@ -3075,7 +3122,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     doctor = teams_sub.add_parser("doctor", help="Diagnose broken/waiting agent panes")
     doctor.add_argument("--session", default=None, help="Tmux session (default: configured default_session)")
     doctor.add_argument("--capture-lines", type=int, default=120, help="Recent pane lines to inspect for issues")
-    doctor.add_argument("--wait-attention-min", type=int, default=1, help="Waiting threshold in minutes")
+    doctor.add_argument("--wait-attention-min", type=int, default=5, help="Waiting threshold in minutes")
     doctor.add_argument("--only-attention", action="store_true", help="Only print panes that need attention")
     doctor.set_defaults(handler=run_doctor)
 
