@@ -45,19 +45,22 @@ Agent Wrangler shortcuts:
     -> Manager (Claude Code + status rail) + Grid (project panes)
   ops
     -> Interactive operator console (numbered menu)
+  init
+    -> Interactive project setup (scan repos, create config)
+  add [path]
+    -> Add a project to config + running grid
   exit | quit
     -> Kill the Agent Wrangler session (or press Option+q)
-  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail
-    -> routed to: teams <command>
-  program ...
-    -> routed to: program_orchestrator.py
+  summary <pane>
+    -> Show recent output from a pane (or press Option+s)
 
 Examples:
+  ./scripts/agent-wrangler init
   ./scripts/agent-wrangler start
+  ./scripts/agent-wrangler add .
+  ./scripts/agent-wrangler add ~/projects/my-app --name my-app
+  ./scripts/agent-wrangler summary my-webapp
   ./scripts/agent-wrangler exit
-  ./scripts/agent-wrangler ops
-  ./scripts/agent-wrangler status
-  ./scripts/agent-wrangler doctor
 EOF
   echo ""
   exec python3 "$SCRIPT_DIR/command_center.py" --help
@@ -73,6 +76,9 @@ case "${1:-}" in
   exit|quit)
     shift
     set -- teams exit "$@"
+    ;;
+  init|add|summary)
+    set -- teams "$@"
     ;;
   up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail|hide|show|hidden)
     set -- teams "$@"

@@ -561,10 +561,15 @@ def set_window_orchestrator_format(session: str) -> None:
         "#[default]"
     )
     tmux(["set-option", "-w", "-t", target, "pane-border-format", fmt], timeout=5)
-    # Status bar: zoom indicator + session name
+    # Status bar: left shows session name, right shows zoom + time
+    tmux(["set-option", "-t", session, "status-style", "bg=colour235,fg=colour250"], timeout=5)
+    tmux(["set-option", "-t", session, "status-left",
+          " #[fg=colour39 bold]AW#[default] #[fg=colour130]#{session_name}#[default] "], timeout=5)
+    tmux(["set-option", "-t", session, "status-left-length", "30"], timeout=5)
     tmux(["set-option", "-t", session, "status-right",
           "#{?window_zoomed_flag,#[fg=colour214 bold] ZOOM #[default],} "
-          "#[fg=colour130]#{session_name}#[default] %H:%M"], timeout=5)
+          "#[fg=colour250]%H:%M#[default] "], timeout=5)
+    tmux(["set-option", "-t", session, "status-right-length", "30"], timeout=5)
 
 
 _WINDOW_FORMAT_APPLIED: set[str] = set()
@@ -644,6 +649,49 @@ def refresh_pane_health(
                 "cc_stats": cc_stats,
             }
         )
+
+    # Update status bar with aggregate stats
+    if apply_colors and rows:
+        counts = {"green": 0, "yellow": 0, "red": 0}
+        agents = 0
+        total_ctx = 0
+        total_cost = 0.0
+        ctx_count = 0
+        for row in rows:
+            lev = str(row.get("health") or "").lower()
+            if lev in counts:
+                counts[lev] += 1
+            if row.get("agent") not in (None, "-", ""):
+                agents += 1
+            cc = row.get("cc_stats")
+            if cc and cc.get("context_pct") is not None:
+                total_ctx += int(cc["context_pct"])
+                ctx_count += 1
+                total_cost += float(cc.get("cost") or 0)
+        avg_ctx = total_ctx // ctx_count if ctx_count else 0
+        status_right = (
+            f"#[fg=colour34]{counts['green']}g#[default] "
+            f"#[fg=colour220]{counts['yellow']}y#[default] "
+            f"#[fg=colour196]{counts['red']}r#[default]"
+        )
+        if agents:
+            status_right += f" #[fg=colour75]|#[default] {agents} agents"
+        if ctx_count:
+            ctx_color = "colour196" if avg_ctx >= 80 else "colour220" if avg_ctx >= 50 else "colour34"
+            status_right += f" #[fg={ctx_color}]{avg_ctx}%#[default]"
+        if total_cost > 0:
+            status_right += f" #[fg=colour245]${total_cost:.2f}#[default]"
+        status_right += (
+            " #{?window_zoomed_flag,#[fg=colour214 bold] ZOOM #[default],}"
+            " #[fg=colour250]%H:%M#[default] "
+        )
+        tmux(["set-option", "-t", session, "status-right", status_right], timeout=3)
+        tmux(["set-option", "-t", session, "status-right-length", "60"], timeout=3)
+
+    # Desktop notifications on health state changes
+    if apply_colors:
+        check_and_notify(rows)
+
     return rows
 
 
@@ -1067,8 +1115,8 @@ def create_grid_session(
         if code != 0:
             raise ValueError(err.strip() or f"failed to set pane title for {pane.pane_id}")
 
-        banner = f"clear; echo '[{project_id}] {project.get('path', '')}'"
-        pane_send(pane.pane_id, banner, enter=True)
+        # Show project context without clearing — preserves shell state
+        pane_send(pane.pane_id, f"echo '\\n[{project_id}] ready'", enter=True)
 
         startup_command = str(project.get("startup_command") or "").strip()
         if startup_command and not no_startup:
@@ -1110,6 +1158,10 @@ def ghostty_import_plan(
     unmatched: list[dict[str, Any]] = []
 
     for session in sessions:
+        # Skip background sessions — only import active/waiting terminals
+        if str(session.get("status")) == "background":
+            continue
+
         project_id, cwd = infer_project_id_from_session(session, proj_map)
         if not project_id:
             unmatched.append(
@@ -2236,10 +2288,13 @@ def run_nav(args: argparse.Namespace) -> int:
         ("M-g", ["select-window", "-t", f"{session}:grid"]),
     ]
     exit_script = str(ROOT / "scripts" / "agent-wrangler")
+    summary_script = str(ROOT / "scripts" / "tmux_teams.py")
     utility_bindings = [
         ("M-z", ["resize-pane", "-Z"]),          # zoom toggle
         ("M-j", ["display-panes", "-d", "2000"]),  # jump by number overlay
         ("M-q", ["confirm-before", "-p", "Exit Agent Wrangler? (y/n)", f"run-shell '{exit_script} exit --force'"]),
+        ("M-s", ["display-popup", "-E", "-w", "80", "-h", "30",
+                  f"python3 {summary_script} teams summary #{{pane_title}} --session {session} --lines 50; read"]),
     ]
     all_bindings = pane_bindings + window_bindings + index_bindings + named_window_bindings + utility_bindings
 
@@ -2262,7 +2317,7 @@ def run_nav(args: argparse.Namespace) -> int:
     print("Window navigation: Option+[ / Option+]")
     print("Window direct jump: Option+1..9")
     print("Named windows: Option+m (manager) | Option+g (grid)")
-    print("Utilities: Option+z (zoom toggle) | Option+j (jump by number) | Option+q (exit)")
+    print("Utilities: Option+z (zoom) | Option+j (jump) | Option+q (exit) | Option+s (summary)")
     print("Mouse: click pane to select | scroll to browse output")
     return 0
 
@@ -2507,6 +2562,239 @@ def run_list_projects(args: argparse.Namespace) -> int:
         if group and pg.lower() != group:
             continue
         print(f"{project['id']:<22} {pg:<10} {project.get('path', '')}")
+    return 0
+
+
+PROJECTS_CONFIG = ROOT / "config" / "projects.json"
+NOTIFY_STATE_PATH = ROOT / ".state" / "health_state.json"
+
+
+def _load_health_state() -> dict[str, str]:
+    """Load previous pane health levels from state file."""
+    try:
+        if NOTIFY_STATE_PATH.exists():
+            return json.loads(NOTIFY_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_health_state(state: dict[str, str]) -> None:
+    """Persist current pane health levels for change detection."""
+    try:
+        NOTIFY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        NOTIFY_STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _notify_desktop(title: str, message: str) -> None:
+    """Send a macOS desktop notification."""
+    try:
+        subprocess.run(
+            [
+                "osascript", "-e",
+                f'display notification "{message}" with title "{title}" sound name "Ping"',
+            ],
+            timeout=5,
+            check=False,
+            capture_output=True,
+        )
+    except Exception:
+        pass
+
+
+def check_and_notify(rows: list[dict[str, Any]]) -> None:
+    """Compare health state, send desktop notifications on transitions."""
+    prev = _load_health_state()
+    current: dict[str, str] = {}
+    alerts: list[str] = []
+
+    for row in rows:
+        key = str(row.get("project_id") or row.get("pane_id") or "")
+        level = str(row.get("health") or "green")
+        current[key] = level
+
+        prev_level = prev.get(key)
+        if prev_level and prev_level != "red" and level == "red":
+            reason = str(row.get("reason") or "needs attention")
+            alerts.append(f"{key}: {reason}")
+        elif prev_level == "red" and level == "green":
+            alerts.append(f"{key}: recovered")
+
+    _save_health_state(current)
+
+    if alerts:
+        _notify_desktop("Agent Wrangler", "\n".join(alerts[:5]))
+
+
+def run_init(_: argparse.Namespace) -> int:
+    """Interactive project setup — scan for git repos and create projects.json."""
+    if PROJECTS_CONFIG.exists():
+        try:
+            answer = input(f"{PROJECTS_CONFIG} already exists. Overwrite? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 1
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+
+    home = Path.home()
+    print(f"Scanning {home} for git repositories...")
+
+    repos: list[Path] = []
+    for entry in sorted(home.iterdir()):
+        if entry.name.startswith(".") or not entry.is_dir():
+            continue
+        if (entry / ".git").is_dir():
+            repos.append(entry)
+
+    if not repos:
+        print("No git repos found in home directory.")
+        return 1
+
+    print(f"\nFound {len(repos)} repos:\n")
+    for idx, repo in enumerate(repos):
+        print(f"  {idx + 1:>2}. {repo.name:<30} {repo}")
+
+    print(f"\nEnter numbers to include (e.g. 1,3,5-8), or 'all':")
+    try:
+        selection = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 1
+
+    selected: list[Path] = []
+    if selection.lower() == "all":
+        selected = list(repos)
+    else:
+        for part in selection.split(","):
+            part = part.strip()
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                for idx in range(int(lo), int(hi) + 1):
+                    if 1 <= idx <= len(repos):
+                        selected.append(repos[idx - 1])
+            elif part.isdigit():
+                idx = int(part)
+                if 1 <= idx <= len(repos):
+                    selected.append(repos[idx - 1])
+
+    if not selected:
+        print("No projects selected.")
+        return 1
+
+    projects: list[dict[str, Any]] = []
+    for repo in selected:
+        proj_id = repo.name.replace(" ", "-").lower()
+        projects.append({
+            "id": proj_id,
+            "name": repo.name,
+            "path": str(repo),
+            "default_branch": "main",
+        })
+
+    config = {"projects": projects}
+    PROJECTS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+    print(f"\nCreated {PROJECTS_CONFIG} with {len(projects)} projects:")
+    for p in projects:
+        print(f"  - {p['id']}")
+
+    # Also create team_grid.json if missing
+    if not CONFIG_PATH.exists():
+        grid_config = {
+            "default_session": "agent-grid",
+            "default_layout": "tiled",
+            "default_projects": [p["id"] for p in projects[:10]],
+            "persistence": {"enabled": False, "autosave_minutes": 15},
+            "profiles": {"current": "default", "items": {"default": {"max_panes": 10}}},
+            "updated_at": now_iso(),
+        }
+        CONFIG_PATH.write_text(json.dumps(grid_config, indent=2) + "\n", encoding="utf-8")
+        print(f"Created {CONFIG_PATH}")
+
+    print("\nRun: ./scripts/agent-wrangler start")
+    return 0
+
+
+def run_add(args: argparse.Namespace) -> int:
+    """Add current directory (or specified path) as a project and hot-add to running grid."""
+    path = Path(args.path).resolve() if args.path else Path.cwd()
+    if not path.is_dir():
+        raise ValueError(f"Not a directory: {path}")
+
+    proj_id = args.name or path.name.replace(" ", "-").lower()
+
+    # Add to projects.json
+    config: dict[str, Any] = {}
+    if PROJECTS_CONFIG.exists():
+        config = json.loads(PROJECTS_CONFIG.read_text(encoding="utf-8"))
+    projects = config.setdefault("projects", [])
+
+    # Check if already exists
+    existing = [p for p in projects if p.get("id") == proj_id]
+    if existing:
+        print(f"Project '{proj_id}' already in config.")
+    else:
+        projects.append({
+            "id": proj_id,
+            "name": path.name,
+            "path": str(path),
+            "default_branch": "main",
+        })
+        PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        print(f"Added '{proj_id}' to {PROJECTS_CONFIG}")
+
+    # Hot-add to running grid if tmux session exists
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    if session_exists(session):
+        split_for_path(session, str(path))
+        apply_layout(session, "tiled")
+        # Tag the new pane
+        panes = list_panes(session)
+        if panes:
+            last_pane = panes[-1]
+            pane_set_project_id(last_pane.pane_id, proj_id)
+            tmux(["select-pane", "-t", last_pane.pane_id, "-T", proj_id], timeout=5)
+            pane_send(last_pane.pane_id, f"echo '\\n[{proj_id}] ready'", enter=True)
+        set_window_orchestrator_format(session)
+        print(f"Added pane for '{proj_id}' to session '{session}'")
+    else:
+        print(f"Session '{session}' not running. Pane will appear on next start.")
+
+    return 0
+
+
+def run_summary(args: argparse.Namespace) -> int:
+    """Show a summary of recent output from a pane."""
+    ensure_tmux()
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    pane = pane_target(session, args.pane)
+    lines = max(10, int(args.lines))
+    raw = capture_pane_raw(pane.pane_id, lines=lines)
+
+    # Extract meaningful lines (skip empty, prompts-only)
+    meaningful: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip bare shell prompts
+        if stripped in ("$", "%", ">", "❯"):
+            continue
+        meaningful.append(stripped)
+
+    project = pane.project_id or pane.pane_title
+    print(f"[{project}] Last {lines} lines ({len(meaningful)} non-empty):")
+    print("─" * 60)
+    for line in meaningful[-30:]:
+        print(line)
+    print("─" * 60)
     return 0
 
 
@@ -2768,6 +3056,21 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     hooks_disable = hooks_sub.add_parser("disable", help="Disable hooks for a session")
     hooks_disable.add_argument("--session", default=None)
     hooks_disable.set_defaults(handler=run_hooks_disable)
+
+    init_cmd = teams_sub.add_parser("init", help="Interactive project setup — scan for repos and create config")
+    init_cmd.set_defaults(handler=run_init)
+
+    add_cmd = teams_sub.add_parser("add", help="Add a project to config and running grid")
+    add_cmd.add_argument("path", nargs="?", default=None, help="Directory path (default: current directory)")
+    add_cmd.add_argument("--name", help="Project ID override (default: directory name)")
+    add_cmd.add_argument("--session", default=None)
+    add_cmd.set_defaults(handler=run_add)
+
+    summary_cmd = teams_sub.add_parser("summary", help="Show recent output summary from a pane")
+    summary_cmd.add_argument("pane", help="Pane token (project id, index, or pane id)")
+    summary_cmd.add_argument("--session", default=None)
+    summary_cmd.add_argument("--lines", type=int, default=50, help="Lines to capture")
+    summary_cmd.set_defaults(handler=run_summary)
 
     doctor = teams_sub.add_parser("doctor", help="Diagnose broken/waiting agent panes")
     doctor.add_argument("--session", default=None, help="Tmux session (default: configured default_session)")

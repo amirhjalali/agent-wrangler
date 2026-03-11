@@ -46,35 +46,15 @@ Python 3.7+ required. No pip install, no venv, no build step — just stdlib.
 
 ## Setup
 
-Tell Agent Wrangler about your projects:
+The fastest way — auto-scan your home directory for git repos:
 
 ```bash
-cp config/projects.example.json config/projects.json
+./scripts/agent-wrangler init
 ```
 
-Edit `config/projects.json` with your repo paths:
+This finds all repos in `~/`, lets you pick which ones to include, and creates your config.
 
-```json
-{
-  "projects": [
-    {
-      "id": "my-webapp",
-      "name": "My Web App",
-      "path": "~/projects/my-webapp",
-      "default_branch": "main",
-      "startup_command": "npm run dev"
-    },
-    {
-      "id": "api-server",
-      "name": "API Server",
-      "path": "~/projects/api-server",
-      "default_branch": "main"
-    }
-  ]
-}
-```
-
-That's it. Each project gets a pane in the grid.
+Or do it manually: `cp config/projects.example.json config/projects.json` and edit the paths.
 
 ## Start
 
@@ -131,13 +111,43 @@ Don't need a pane right now? Hide it. The agent keeps running in the background:
 
 Or use `h` in the grid navigator (`./scripts/agent-wrangler grid`).
 
+## Add projects on the fly
+
+Add the current directory to your grid without editing config:
+
+```bash
+cd ~/projects/new-thing
+./scripts/agent-wrangler add .
+```
+
+Or specify a path and name:
+
+```bash
+./scripts/agent-wrangler add ~/projects/cool-app --name cool-app
+```
+
+If the grid is running, the pane appears immediately.
+
+## Pane summary
+
+See what an agent has been doing:
+
+```bash
+./scripts/agent-wrangler summary my-webapp
+```
+
+Or press `Option+s` on any pane for a popup summary.
+
 ## Monitor
+
+The **status bar** at the bottom of the grid shows aggregate health, agent count, context %, and cost at a glance.
 
 The **status rail** (right side of manager window) auto-refreshes and shows:
 - Health dot per pane (green/yellow/red)
 - Agent type (claude, codex, aider, gemini)
 - Context window % and cost for Claude Code sessions
 - Hidden panes (dimmed)
+- Desktop notifications when a pane goes red or recovers (macOS)
 
 For a wider view:
 

@@ -21,6 +21,9 @@ All commands run from the repo root.
 - `./scripts/agent-wrangler rail` - Compact auto-refreshing status rail (for narrow splits)
 - `./scripts/agent-wrangler status` - Pane health overview
 - `./scripts/agent-wrangler program status` - Readiness score + phase gates
+- `./scripts/agent-wrangler init` - Interactive project setup (scan repos, create config)
+- `./scripts/agent-wrangler add .` - Add current directory to config + running grid
+- `./scripts/agent-wrangler summary <pane>` - Show recent pane output (or press `Option+s`)
 - `./scripts/agent-wrangler exit` - Kill session (or press `Option+q`)
 
 **Shell aliases** (thin wrappers in `scripts/`):
