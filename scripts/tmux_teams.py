@@ -786,6 +786,76 @@ def pane_ctrl_c(pane_id: str) -> None:
         raise ValueError(err.strip() or f"failed to send Ctrl-C to {pane_id}")
 
 
+# ── Hide / Show pane toggling ─────────────────────────────────────
+HIDDEN_PREFIX = "_hid_"
+
+
+def hide_pane(session: str, pane_id: str, project_id: str) -> str:
+    """Move a pane to a hidden background window. Agent keeps running.
+
+    Returns the hidden window name.
+    """
+    hidden_name = f"{HIDDEN_PREFIX}{project_id}"
+    # break-pane moves the pane to its own new window, -d stays in current window
+    code, _, err = tmux(["break-pane", "-d", "-s", pane_id, "-n", hidden_name], timeout=8)
+    if code != 0:
+        raise ValueError(err.strip() or f"failed to hide pane {pane_id}")
+    # Rebalance the grid after removing a pane
+    try:
+        apply_layout(session, "tiled")
+    except ValueError:
+        pass  # May fail if grid is now empty
+    return hidden_name
+
+
+def show_pane(session: str, hidden_window: str) -> None:
+    """Bring a hidden pane back to the grid window."""
+    # join-pane moves the pane from hidden window into the grid window
+    grid_target = f"{session}:grid"
+    source = f"{hidden_window}.0"
+    code, _, err = tmux(["join-pane", "-d", "-s", source, "-t", grid_target], timeout=8)
+    if code != 0:
+        raise ValueError(err.strip() or f"failed to show pane from {hidden_window}")
+    # Rebalance
+    try:
+        apply_layout(session, "tiled")
+    except ValueError:
+        pass
+
+
+def list_hidden_panes(session: str) -> list[dict[str, Any]]:
+    """List all hidden panes (windows with _hid_ prefix) in the session."""
+    code, out, _ = tmux(
+        ["list-windows", "-t", session, "-F", "#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_tty}\t#{pane_current_path}"],
+        timeout=5,
+    )
+    if code != 0:
+        return []
+
+    hidden: list[dict[str, Any]] = []
+    by_tty = session_monitor_by_tty()
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 5:
+            continue
+        name, window_id, pane_id, tty, path = parts[0], parts[1], parts[2], parts[3], parts[4]
+        if not name.startswith(HIDDEN_PREFIX):
+            continue
+        project_id = name[len(HIDDEN_PREFIX):]
+        tty_short = tty.split("/")[-1]
+        monitor = by_tty.get(tty_short, {})
+        hidden.append({
+            "window_name": name,
+            "window_id": window_id,
+            "pane_id": pane_id,
+            "project_id": project_id,
+            "path": path,
+            "agent": str(monitor.get("agent") or "-"),
+            "status": str(monitor.get("status") or "idle"),
+        })
+    return hidden
+
+
 def attach_session(session: str) -> int:
     proc = subprocess.run(["tmux", "attach-session", "-t", session], check=False)
     return int(proc.returncode)
@@ -1441,6 +1511,20 @@ def run_rail(args: argparse.Namespace) -> int:
                 f" \033[36m{claude_count} claude\033[0m  "
                 f"\033[2m{total_tokens_k}k tok  ${total_cost:.2f}\033[0m"
             )
+
+        # Show hidden panes
+        hidden = list_hidden_panes(session)
+        if hidden:
+            lines.append("\033[2m" + "─" * 30 + "\033[0m")
+            lines.append(f" \033[2m{len(hidden)} hidden\033[0m")
+            for h in hidden:
+                hp = str(h.get("project_id") or "?")
+                if len(hp) > 16:
+                    hp = hp[:15] + "~"
+                ha = str(h.get("agent") or "")
+                hs = str(h.get("status") or "")
+                agent_label = f"  {ha}" if ha and ha != "-" else ""
+                lines.append(f" \033[2m○ {hp:<16}{agent_label}  {hs}\033[0m")
 
         print("\n".join(lines), flush=True)
 
@@ -2843,6 +2927,59 @@ def run_capture(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_hide(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    pane = pane_target(session, args.pane)
+    project_id = pane.project_id or pane.pane_title or pane.pane_id
+    hidden_name = hide_pane(session, pane.pane_id, project_id)
+    print(f"Hidden: {project_id} -> {hidden_name}")
+    return 0
+
+
+def run_show(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    hidden = list_hidden_panes(session)
+    if not hidden:
+        print("No hidden panes.")
+        return 0
+
+    # Find by project_id match
+    target = args.pane
+    match = None
+    for h in hidden:
+        if h["project_id"] == target or h["window_name"] == target or h["pane_id"] == target:
+            match = h
+            break
+
+    if not match:
+        print(f"No hidden pane matching '{target}'. Hidden panes:")
+        for h in hidden:
+            print(f"  {h['project_id']}  ({h['agent']}, {h['status']})")
+        return 1
+
+    show_pane(session, match["window_name"])
+    print(f"Restored: {match['project_id']}")
+    return 0
+
+
+def run_hidden(args: argparse.Namespace) -> int:
+    ensure_tmux()
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    hidden = list_hidden_panes(session)
+    if not hidden:
+        print("No hidden panes.")
+        return 0
+    print(f"Hidden panes in '{session}':")
+    for h in hidden:
+        print(f"  {h['project_id']:<22} agent={h['agent']:<8} status={h['status']}")
+    return 0
+
+
 def run_list_projects(args: argparse.Namespace) -> int:
     config = workflow_agent.load_config()
     group = args.group.lower() if args.group else None
@@ -3000,6 +3137,20 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     kill.add_argument("pane")
     kill.add_argument("--session", default=None)
     kill.set_defaults(handler=run_kill)
+
+    hide = teams_sub.add_parser("hide", help="Hide a pane (move to background, agent keeps running)")
+    hide.add_argument("pane")
+    hide.add_argument("--session", default=None)
+    hide.set_defaults(handler=run_hide)
+
+    show = teams_sub.add_parser("show", help="Restore a hidden pane back to the grid")
+    show.add_argument("pane")
+    show.add_argument("--session", default=None)
+    show.set_defaults(handler=run_show)
+
+    hidden = teams_sub.add_parser("hidden", help="List hidden panes")
+    hidden.add_argument("--session", default=None)
+    hidden.set_defaults(handler=run_hidden)
 
     shell = teams_sub.add_parser("shell", help="Reset a pane to a fresh shell")
     shell.add_argument("pane")

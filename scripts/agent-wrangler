@@ -42,9 +42,7 @@ if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 Agent Wrangler shortcuts:
   start
-    -> Manager (Claude Code + status rail) + Grid Navigator + project panes
-  grid
-    -> Standalone grid navigator (curses pane browser)
+    -> Manager (Claude Code + status rail) + Grid (project panes)
   ops
     -> Interactive operator console (numbered menu)
   up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail
@@ -78,7 +76,7 @@ case "${1:-}" in
     MAX_PANES="$(resolve_max_panes)"
     set -- teams up --rebuild --mode import --preserve-duplicates --max-panes "$MAX_PANES" --startup --agent --nav --manager --manager-replace "$@"
     ;;
-  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail)
+  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail|hide|show|hidden)
     set -- teams "$@"
     ;;
   fleet)
@@ -91,10 +89,6 @@ case "${1:-}" in
   overview)
     shift
     set -- ui "$@"
-    ;;
-  grid)
-    shift
-    exec python3 "$SCRIPT_DIR/grid_navigator.py" "$@"
     ;;
 esac
 

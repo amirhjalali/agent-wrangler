@@ -21,7 +21,9 @@ Run Claude Code, Codex, Aider, or Gemini sessions side-by-side in a health-monit
 ## What it does
 
 - **Grid view** — Tile your AI agent sessions in a tmux grid with color-coded health borders (green/yellow/red)
-- **Manager window** — Claude Code + auto-refreshing status rail showing all panes
+- **Manager window** — Claude Code + auto-refreshing status rail showing all panes with context % and cost
+- **Hide/show agents** — Toggle pane visibility without stopping agents. Hidden panes run in the background and appear dimmed in the navigator and rail
+- **Live stats** — Scrapes Claude Code's status bar for model, context window %, token usage, and cost per session
 - **Idle detection** — Classifies each terminal as active, waiting, idle, or background by inspecting process trees
 - **Agent detection** — Automatically identifies running AI tools (claude, codex, aider, gemini)
 - **Fleet management** — Monitor multiple tmux sessions from one place
@@ -98,6 +100,9 @@ After `agent-wrangler start`, you get two tmux windows:
 ./scripts/agent-wrangler send my-webapp --command "git status"
 ./scripts/agent-wrangler stop my-webapp               # Send Ctrl-C
 ./scripts/agent-wrangler capture my-webapp --lines 40  # Grab scrollback
+./scripts/agent-wrangler hide my-webapp               # Hide pane (agent keeps running)
+./scripts/agent-wrangler show my-webapp               # Bring it back to the grid
+./scripts/agent-wrangler hidden                       # List all hidden panes
 ```
 
 ### Grid management
@@ -203,6 +208,7 @@ Layer 0  Ghostty / tmux            Terminal substrate
 |---|---|
 | `j`/`k` or arrows | Navigate panes |
 | `Enter` | Jump to pane |
+| `h` | Hide/show toggle (hidden panes appear dimmed at bottom) |
 | `c` | Launch Claude in pane |
 | `x` | Launch Codex in pane |
 | `s` | Send command to pane |

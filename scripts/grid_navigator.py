@@ -14,12 +14,15 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from tmux_teams import (
     ensure_tmux,
+    hide_pane,
+    list_hidden_panes,
     list_panes,
     load_store,
     pane_send,
     project_map,
     refresh_pane_health,
     session_exists,
+    show_pane,
     tmux,
 )
 from session_stats import (
@@ -52,6 +55,7 @@ def _init_colors() -> None:
     curses.init_pair(PAIR_YELLOW, curses.COLOR_YELLOW, -1)
     curses.init_pair(PAIR_RED, curses.COLOR_RED, -1)
     curses.init_pair(PAIR_DEFAULT, -1, -1)
+    curses.init_pair(PAIR_HIDDEN, curses.COLOR_WHITE, -1)
 
 
 def _health_color(health: str) -> int:
@@ -67,7 +71,7 @@ def _health_color(health: str) -> int:
 
 
 def _fetch_rows(session: str, stats_data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Refresh pane health, collect stats, return row dicts."""
+    """Refresh pane health, collect stats, return row dicts including hidden panes."""
     try:
         rows = refresh_pane_health(
             session=session,
@@ -76,7 +80,11 @@ def _fetch_rows(session: str, stats_data: dict[str, Any]) -> list[dict[str, Any]
             apply_colors=False,
         )
     except Exception:
-        return []
+        rows = []
+
+    # Mark visible rows
+    for row in rows:
+        row["hidden"] = False
 
     # Cheap stats for every pane
     for row in rows:
@@ -100,22 +108,48 @@ def _fetch_rows(session: str, stats_data: dict[str, Any]) -> list[dict[str, Any]
                         update_session_stats(pid, proj, None, usage, stats_data)
                 break  # Only one per cycle
 
+    # Append hidden panes at the bottom
+    for h in list_hidden_panes(session):
+        rows.append({
+            "pane_id": h["pane_id"],
+            "index": -1,
+            "project_id": h["project_id"],
+            "title": h["project_id"],
+            "tty": "",
+            "agent": h["agent"],
+            "status": h["status"],
+            "wait": None,
+            "health": "hidden",
+            "needs_attention": False,
+            "reason": "hidden",
+            "hidden": True,
+            "hidden_window": h["window_name"],
+        })
+
     save_stats(stats_data)
     return rows
 
 
+PAIR_HIDDEN = 7
+
+
 def _format_row(row: dict[str, Any], selected: bool, width: int) -> tuple[str, int]:
     """Return (line_text, curses_attr) for a single pane row."""
+    is_hidden = row.get("hidden", False)
     prefix = " > " if selected else "   "
     project = str(row.get("project_id") or row.get("pane_title") or "-")[:20].ljust(20)
     agent = str(row.get("agent") or row.get("ai_tool") or "-")[:8].ljust(8)
     status = str(row.get("status") or "-")[:10].ljust(10)
+    tag = "[hidden] " if is_hidden else ""
     pane_id = str(row.get("pane_id") or "")
-    line = f"{prefix}{project} {agent} {status} {pane_id}"
+    line = f"{prefix}{tag}{project} {agent} {status} {pane_id}"
     if len(line) > width:
         line = line[:width]
 
-    color = _health_color(str(row.get("health") or ""))
+    if is_hidden:
+        color = curses.color_pair(PAIR_HIDDEN) | curses.A_DIM
+    else:
+        color = _health_color(str(row.get("health") or ""))
     attr = color | curses.A_BOLD if selected else color
     return line, attr
 
@@ -146,7 +180,7 @@ def grid_main(stdscr: Any, session: str, interval: int, manager_window: str) -> 
             pass
 
         # --- Footer (last row) ---
-        footer = " j/k:nav  Enter:jump  c:claude  x:codex  s:send  K:ctrl-c  r:refresh  tab:mgr  q:quit "
+        footer = " j/k:nav  Enter:jump  h:hide/show  c:claude  x:codex  s:send  K:ctrl-c  r:refresh  q:quit "
         if len(footer) > max_x:
             footer = footer[:max_x]
         try:
@@ -272,6 +306,33 @@ def grid_main(stdscr: Any, session: str, interval: int, manager_window: str) -> 
                 target = rows[selected].get("pane_id")
                 if target:
                     tmux(["send-keys", "-t", target, "C-c", ""], timeout=5)
+            continue
+
+        # Hide/show toggle (h)
+        if key == ord("h"):
+            if rows and 0 <= selected < len(rows):
+                row = rows[selected]
+                if row.get("hidden"):
+                    # Show: bring hidden pane back to grid
+                    wname = row.get("hidden_window")
+                    if wname:
+                        try:
+                            show_pane(session, wname)
+                        except ValueError:
+                            pass
+                else:
+                    # Hide: move pane to background
+                    target = row.get("pane_id")
+                    project = row.get("project_id") or row.get("title") or target
+                    if target:
+                        try:
+                            hide_pane(session, target, project)
+                        except ValueError:
+                            pass
+                rows = _fetch_rows(session, stats_data)
+                last_refresh = time.monotonic()
+                if selected >= len(rows):
+                    selected = max(0, len(rows) - 1)
             continue
 
         # Manual refresh
