@@ -462,6 +462,18 @@ def capture_pane_raw(pane_id: str, lines: int) -> str:
     return out
 
 
+def batch_set_pane_options(pane_id: str, options: list[tuple[str, str]]) -> None:
+    """Set multiple pane options in a single tmux command using \\; separators."""
+    if not options:
+        return
+    args: list[str] = []
+    for key, value in options:
+        if args:
+            args.append(";")
+        args.extend(["set-option", "-p", "-t", pane_id, key, value])
+    tmux(args, timeout=8)
+
+
 # ── Claude Code status bar parser ──────────────────────────────────
 # Parses the native status line rendered at the bottom of Claude Code sessions:
 #   Opus 4.6 | ●●●●○○○○○○ 86k/200k (42%) | ~$2.93
@@ -475,17 +487,11 @@ _CC_MODEL_RE = re.compile(
 _CC_RATE_RE = re.compile(r"(\d+(?:hr|d))\s+[●○]+\s+(\d+)%")
 
 
-def parse_claude_status(pane_id: str) -> dict[str, Any] | None:
-    """Scrape Claude Code's status bar from the bottom of a pane.
-
-    Returns dict with model, tokens_used, tokens_max, context_pct, cost,
-    and rate limits, or None if no status bar found.
-    """
-    raw = capture_pane_raw(pane_id, lines=8)
+def _parse_claude_status_from_text(raw: str) -> dict[str, Any] | None:
+    """Parse Claude Code status bar from already-captured pane text."""
     if not raw:
         return None
 
-    # Work backwards from bottom to find the status lines
     lines = [ln for ln in raw.splitlines() if ln.strip()]
     if len(lines) < 2:
         return None
@@ -503,13 +509,18 @@ def parse_claude_status(pane_id: str) -> dict[str, Any] | None:
             result["context_pct"] = int(m.group(4))
             result["cost"] = float(m.group(5))
 
-        # Rate limit lines (5hr / 7d)
         for rm in _CC_RATE_RE.finditer(line):
             window = rm.group(1)
             pct = int(rm.group(2))
             result[f"rate_{window}"] = pct
 
     return result if result else None
+
+
+def parse_claude_status(pane_id: str) -> dict[str, Any] | None:
+    """Scrape Claude Code's status bar from the bottom of a pane."""
+    raw = capture_pane_raw(pane_id, lines=8)
+    return _parse_claude_status_from_text(raw)
 
 
 def detect_error_marker(text: str) -> str | None:
@@ -607,16 +618,23 @@ def set_window_orchestrator_format(session: str) -> None:
           "#[fg=colour130]#{session_name}#[default] %H:%M"], timeout=5)
 
 
+_WINDOW_FORMAT_APPLIED: set[str] = set()
+
+
 def refresh_pane_health(
     session: str,
     capture_lines: int,
     wait_attention_min: int,
+    apply_colors: bool = True,
 ) -> list[dict[str, Any]]:
     panes = list_panes(session)
     by_tty = session_monitor_by_tty()
     rows: list[dict[str, Any]] = []
 
-    set_window_orchestrator_format(session)
+    # Window format only needs to be set once per session, not every refresh
+    if apply_colors and session not in _WINDOW_FORMAT_APPLIED:
+        set_window_orchestrator_format(session)
+        _WINDOW_FORMAT_APPLIED.add(session)
 
     for pane in panes:
         tty_short = pane.pane_tty.split("/")[-1]
@@ -624,7 +642,10 @@ def refresh_pane_health(
         agent = str(monitor.get("agent") or "-")
         status = str(monitor.get("status") or "idle")
         wait = monitor.get("waiting_minutes")
-        pane_text = capture_pane_text(pane.pane_id, lines=capture_lines)
+
+        # Single capture per pane — use raw text for both health detection and status bar
+        raw_text = capture_pane_raw(pane.pane_id, lines=capture_lines)
+        pane_text = raw_text.lower()
         error_marker = detect_error_marker(pane_text)
         missing_command = detect_missing_command(pane_text)
         port_in_use = detect_port_in_use(pane_text)
@@ -638,20 +659,22 @@ def refresh_pane_health(
         elif port_in_use and not reason.startswith("error:"):
             reason = f"port in use: {port_in_use}"
 
-        # Parse Claude Code status bar for agent panes
+        # Parse Claude Code status bar from the already-captured raw text
         cc_stats = None
         if agent == "claude":
-            cc_stats = parse_claude_status(pane.pane_id)
+            cc_stats = _parse_claude_status_from_text(raw_text)
 
-        tmux(["set-option", "-p", "-t", pane.pane_id, "@agent", agent], timeout=5)
-        tmux(["set-option", "-p", "-t", pane.pane_id, "@health", level.upper()], timeout=5)
-        tmux(["set-option", "-p", "-t", pane.pane_id, "@health_reason", reason], timeout=5)
-        tmux(["set-option", "-p", "-t", pane.pane_id, "@needs_attention", "1" if needs_attention else "0"], timeout=5)
-
-        # Always apply border colors — health on hue, active pane bright white
-        border_style, active_style = style_for_level(level)
-        tmux(["set-option", "-p", "-t", pane.pane_id, "pane-border-style", border_style], timeout=5)
-        tmux(["set-option", "-p", "-t", pane.pane_id, "pane-active-border-style", active_style], timeout=5)
+        if apply_colors:
+            # Batch all pane options into a single tmux command
+            border_style, active_style = style_for_level(level)
+            batch_set_pane_options(pane.pane_id, [
+                ("@agent", agent),
+                ("@health", level.upper()),
+                ("@health_reason", reason),
+                ("@needs_attention", "1" if needs_attention else "0"),
+                ("pane-border-style", border_style),
+                ("pane-active-border-style", active_style),
+            ])
 
         rows.append(
             {
