@@ -49,6 +49,11 @@ No pip install, no virtual environment, no build step. Pure Python stdlib + Bash
 git clone https://github.com/YOUR_USER/agent-wrangler.git
 cd agent-wrangler
 
+# Copy example configs and edit with your project paths
+cp config/projects.example.json config/projects.json
+cp config/team_grid.example.json config/team_grid.json
+# Edit config/projects.json with your actual repo paths
+
 # Start everything: grid + manager + nav bindings
 ./scripts/agent-wrangler start
 

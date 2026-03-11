@@ -4,3 +4,5 @@ __pycache__/
 .state/
 reports/
 *.log
+config/projects.json
+config/team_grid.json
