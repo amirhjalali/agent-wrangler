@@ -45,25 +45,19 @@ Agent Wrangler shortcuts:
     -> Manager (Claude Code + status rail) + Grid (project panes)
   ops
     -> Interactive operator console (numbered menu)
+  exit | quit
+    -> Kill the Agent Wrangler session (or press Option+q)
   up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail
     -> routed to: teams <command>
-  fleet ...
-    -> routed to: teams fleet ...
   program ...
     -> routed to: program_orchestrator.py
-  overview
-    -> routed to: ui (deprecated, use start instead)
 
 Examples:
-  ./scripts/agent-wrangler ops
   ./scripts/agent-wrangler start
-  ./scripts/agent-wrangler up --rebuild --mode import --preserve-duplicates --max-panes 10 --nav --manager --manager-replace
-  ./scripts/agent-wrangler fleet manager --replace --update-defaults
-  ./scripts/agent-wrangler drift --fleet --alert-dirty 25
-  ./scripts/agent-wrangler program phases --refresh-state
-  ./scripts/agent-wrangler program promote
-  ./scripts/agent-wrangler program loop --iterations 1 --apply-safe --write-report
-  ./scripts/agent-wrangler program daemon --apply-guardrails
+  ./scripts/agent-wrangler exit
+  ./scripts/agent-wrangler ops
+  ./scripts/agent-wrangler status
+  ./scripts/agent-wrangler doctor
 EOF
   echo ""
   exec python3 "$SCRIPT_DIR/command_center.py" --help
@@ -76,10 +70,11 @@ case "${1:-}" in
     MAX_PANES="$(resolve_max_panes)"
     set -- teams up --rebuild --mode import --preserve-duplicates --max-panes "$MAX_PANES" --startup --agent --nav --manager --manager-replace "$@"
     ;;
-  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail|hide|show|hidden)
-    set -- teams "$@"
+  exit|quit)
+    shift
+    set -- teams exit "$@"
     ;;
-  fleet)
+  up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail|hide|show|hidden)
     set -- teams "$@"
     ;;
   program)

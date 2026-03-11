@@ -21,6 +21,7 @@ All commands run from the repo root.
 - `./scripts/agent-wrangler rail` - Compact auto-refreshing status rail (for narrow splits)
 - `./scripts/agent-wrangler status` - Pane health overview
 - `./scripts/agent-wrangler program status` - Readiness score + phase gates
+- `./scripts/agent-wrangler exit` - Kill session (or press `Option+q`)
 
 **Shell aliases** (thin wrappers in `scripts/`):
 - `wrangler` -> `agent-wrangler`
@@ -46,7 +47,7 @@ After `agent-wrangler start`, the tmux session has three window types:
 ```
 Layer 4  program_orchestrator.py   Phase-gated delivery (team roles, loops, readiness gates)
 Layer 3  command_center.py         Gastown planning board + Ant Farm runtime (legacy curses UI deprecated)
-Layer 2  tmux_teams.py             Tmux grid control (panes, sessions, fleet, health coloring, manager, rail)
+Layer 2  tmux_teams.py             Tmux grid control (panes, sessions, health coloring, manager, rail)
         grid_navigator.py         Curses pane browser (standalone, imports from tmux_teams)
         session_stats.py          Cheap + periodic context stats collection
 Layer 1  terminal_sentinel.py      Process/TTY monitoring, AI tool classification
@@ -58,13 +59,13 @@ Layer 0  Ghostty / tmux            Terminal substrate
 `agent-wrangler` (bash) routes subcommands:
 - `start` -> welcome banner + `teams up` with manager + grid + nav flags
 - `grid` -> `grid_navigator.py` directly
-- `up`, `status`, `paint`, `watch`, `fleet`, `nav`, `rail`, etc. -> `command_center.py teams ...` -> delegates to `tmux_teams.py`
+- `up`, `status`, `paint`, `watch`, `nav`, `rail`, `exit`, etc. -> `command_center.py teams ...` -> delegates to `tmux_teams.py`
 - `program ...` -> `program_orchestrator.py` directly
 - `ops`, `gastown`, `antfarm` -> `command_center.py` directly
 
 ### Key Modules
 
-**`tmux_teams.py`** - The core engine. Manages tmux sessions, panes, health detection, fleet orchestration, persistence, profiles, hooks, and Ghostty-to-tmux import. The `run_manager` function creates a Claude Code + status rail split window. The `run_rail` function provides the compact auto-refreshing sidebar. Uses `@dataclass TmuxPane` as its primary data structure.
+**`tmux_teams.py`** - The core engine. Manages tmux sessions, panes, health detection, persistence, profiles, hooks, and Ghostty-to-tmux import. The `run_manager` function creates a Claude Code + status rail split window. The `run_rail` function provides the compact auto-refreshing sidebar. Uses `@dataclass TmuxPane` as its primary data structure.
 
 **`grid_navigator.py`** - Standalone curses pane browser. Shows pane list with health coloring (green/yellow/red), stats header with agent counts and context usage. Supports jump-to-pane, launch agent, send command, and switch-to-manager keybindings.
 
@@ -81,7 +82,7 @@ Layer 0  Ghostty / tmux            Terminal substrate
 ### Configuration Files (all in `config/`)
 
 - **`projects.json`** - Project registry. Each entry: `id`, `name`, `group` (business/personal), `path`, `default_branch`, `startup_command`. Two groups with WIP limits (business: 3, personal: 2).
-- **`team_grid.json`** - Tmux session config, fleet membership, workspace profiles (each profile sets `max_panes`), persistence settings.
+- **`team_grid.json`** - Tmux session config, workspace profiles (each profile sets `max_panes`), persistence settings.
 - **`command_center.json`** - Gastown cards and Ant Farm source settings.
 - **`impeccable_program.json`** - Phase definitions, team roles, loop cadences, readiness history.
 
@@ -100,4 +101,5 @@ Layer 0  Ghostty / tmux            Terminal substrate
 - Environment variables: `AW_MAX_PANES` (override max panes)
 - Health signals use consistent color coding: green (ok), yellow (attention), red (failure)
 - AI tool detection markers: `claude`, `codex`, `aider`, `chatgpt`, `gemini`
-- Navigation bindings: `Option+Arrow` (panes), `Option+[/]` (windows), `Option+m/g` (manager/grid), `Option+z` (zoom), `Option+j` (jump by number)
+- Navigation bindings: `Option+Arrow` (panes), `Option+[/]` (windows), `Option+m/g` (manager/grid), `Option+z` (zoom), `Option+j` (jump by number), `Option+q` (exit)
+- Mouse: click pane to select, scroll to browse output

@@ -2061,11 +2061,9 @@ def run_palette(_: argparse.Namespace) -> int:
     print(f"10. {PRIMARY_CLI} manager --replace")
     print(f"11. {PRIMARY_CLI} nav")
     print(f"12. {PRIMARY_CLI} status")
-    print(f"13. {PRIMARY_CLI} fleet status")
-    print(f"14. {PRIMARY_CLI} fleet manager --replace --update-defaults")
-    print(f"15. {PRIMARY_CLI} drift --fleet --alert-dirty 25")
-    print(f"16. {PRIMARY_CLI} fleet jump --fzf")
-    print(f"17. {PRIMARY_CLI} doctor --fleet --only-attention")
+    print(f"13. {PRIMARY_CLI} drift --alert-dirty 25")
+    print(f"14. {PRIMARY_CLI} doctor --only-attention")
+    print(f"15. {PRIMARY_CLI} exit")
     print(f"18. {PRIMARY_CLI} persistence status")
     print(f"19. {PRIMARY_CLI} persistence save")
     print(f"20. {PRIMARY_CLI} persistence restore --force --attach")
@@ -2106,9 +2104,7 @@ def run_ops(_: argparse.Namespace) -> int:
         ("Launch agent in pane/project token", ["__agent__"]),
         ("Stop pane (Ctrl-C) by project/token", ["__stop__"]),
         ("Open manager window", ["manager", "--replace"]),
-        ("Fleet status", ["fleet", "status"]),
-        ("Fleet jump (fzf)", ["fleet", "jump", "--fzf"]),
-        ("Doctor (fleet attention)", ["doctor", "--fleet", "--only-attention"]),
+        ("Doctor (attention)", ["doctor", "--only-attention"]),
         ("Enable hooks", ["hooks", "enable"]),
         ("Persistence save", ["persistence", "save"]),
         ("Persistence restore (last snapshot)", ["persistence", "restore", "--force", "--attach"]),

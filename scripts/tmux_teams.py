@@ -26,8 +26,6 @@ PERSISTENCE_DIR = ROOT / ".state" / "persistence"
 
 DEFAULT_SESSION = "amir-grid"
 DEFAULT_LAYOUT = "auto"
-DEFAULT_FLEET_MANAGER_SESSION = "wrangler-hq"
-DEFAULT_FLEET_MANAGER_WINDOW = "fleet"
 VALID_LAYOUTS = {"tiled", "even-horizontal", "even-vertical", "main-horizontal", "main-vertical"}
 LAYOUT_CHOICES = sorted(VALID_LAYOUTS | {"auto"})
 DEFAULT_LIMIT = 6
@@ -102,11 +100,6 @@ def default_store() -> dict[str, Any]:
         "default_session": DEFAULT_SESSION,
         "default_layout": DEFAULT_LAYOUT,
         "default_projects": [],
-        "fleet": {
-            "managed_sessions": [],
-            "manager_session": DEFAULT_FLEET_MANAGER_SESSION,
-            "manager_window": DEFAULT_FLEET_MANAGER_WINDOW,
-        },
         "persistence": {
             "enabled": False,
             "autosave_minutes": 15,
@@ -132,15 +125,6 @@ def _normalize_store(data: dict[str, Any] | None) -> dict[str, Any]:
         **base,
         **current,
     }
-    base_fleet = base.get("fleet", {})
-    fleet = current.get("fleet", {}) if isinstance(current.get("fleet"), dict) else {}
-    merged["fleet"] = {
-        **base_fleet,
-        **fleet,
-    }
-    managed = merged.get("fleet", {}).get("managed_sessions")
-    if not isinstance(managed, list):
-        merged["fleet"]["managed_sessions"] = []
     persistence = current.get("persistence", {}) if isinstance(current.get("persistence"), dict) else {}
     merged["persistence"] = {
         "enabled": bool(persistence.get("enabled", base.get("persistence", {}).get("enabled", False))),
@@ -354,41 +338,6 @@ def list_tmux_sessions() -> list[str]:
     sessions = [line.strip() for line in out.splitlines() if line.strip()]
     return sorted(set(sessions))
 
-
-def store_managed_sessions(store: dict[str, Any]) -> list[str]:
-    fleet = store.get("fleet", {})
-    values = fleet.get("managed_sessions", [])
-    if not isinstance(values, list):
-        return []
-    return [str(item).strip() for item in values if str(item).strip()]
-
-
-def resolve_fleet_sessions(
-    *,
-    store: dict[str, Any],
-    explicit_csv: str | None,
-    pattern: str | None,
-    include_manager: bool = False,
-) -> list[str]:
-    running = list_tmux_sessions()
-    fleet_cfg = store.get("fleet", {})
-    manager_session = str(fleet_cfg.get("manager_session") or DEFAULT_FLEET_MANAGER_SESSION).strip()
-
-    explicit = split_csv(explicit_csv)
-    if explicit:
-        sessions = [name for name in explicit if name in running]
-    else:
-        managed = [name for name in store_managed_sessions(store) if name in running]
-        sessions = managed if managed else list(running)
-
-    if pattern:
-        needle = pattern.lower()
-        sessions = [name for name in sessions if needle in name.lower()]
-
-    if not include_manager and manager_session:
-        sessions = [name for name in sessions if name != manager_session]
-
-    return sorted(set(sessions))
 
 
 def pane_format() -> str:
@@ -1740,136 +1689,6 @@ def run_manager(args: argparse.Namespace) -> int:
     return 0
 
 
-def fleet_health_rows(
-    *,
-    sessions: list[str],
-    capture_lines: int,
-    wait_attention_min: int,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for session in sessions:
-        if not session_exists(session):
-            rows.append(
-                {
-                    "session": session,
-                    "ok": False,
-                    "error": "session not found",
-                    "panes": 0,
-                    "attention": 0,
-                    "waiting": 0,
-                    "active": 0,
-                    "red": 0,
-                    "yellow": 0,
-                    "green": 0,
-                    "top_reason": "-",
-                }
-            )
-            continue
-        try:
-            rows.append(
-                session_health_summary(
-                    session=session,
-                    capture_lines=capture_lines,
-                    wait_attention_min=wait_attention_min,
-
-                )
-            )
-        except ValueError as exc:
-            rows.append(
-                {
-                    "session": session,
-                    "ok": False,
-                    "error": str(exc),
-                    "panes": 0,
-                    "attention": 0,
-                    "waiting": 0,
-                    "active": 0,
-                    "red": 0,
-                    "yellow": 0,
-                    "green": 0,
-                    "top_reason": "-",
-                }
-            )
-    return rows
-
-
-def print_fleet_table(rows: list[dict[str, Any]]) -> None:
-    print(
-        f"{'SESSION':<22} {'OK':<3} {'PANES':<5} {'ATTN':<4} {'WAIT':<4} {'ACT':<4} "
-        f"{'R':<2} {'Y':<2} {'G':<2} TOP_REASON"
-    )
-    for row in rows:
-        ok = "yes" if row.get("ok") else "no"
-        top_reason = row.get("top_reason") or row.get("error") or "-"
-        print(
-            f"{str(row.get('session') or '-'):<22} {ok:<3} {int(row.get('panes') or 0):<5} "
-            f"{int(row.get('attention') or 0):<4} {int(row.get('waiting') or 0):<4} {int(row.get('active') or 0):<4} "
-            f"{int(row.get('red') or 0):<2} {int(row.get('yellow') or 0):<2} {int(row.get('green') or 0):<2} "
-            f"{str(top_reason)}"
-        )
-
-
-def run_fleet_list(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    running = list_tmux_sessions()
-    managed = set(store_managed_sessions(store))
-    fleet_cfg = store.get("fleet", {})
-    manager_session = str(fleet_cfg.get("manager_session") or DEFAULT_FLEET_MANAGER_SESSION)
-    manager_window = str(fleet_cfg.get("manager_window") or DEFAULT_FLEET_MANAGER_WINDOW)
-
-    print(f"Fleet manager session: {manager_session}  window: {manager_window}")
-    if not running:
-        print("No running tmux sessions.")
-        return 0
-    print(f"{'SESSION':<24} {'MANAGED':<7} {'ROLE':<10}")
-    for session in running:
-        is_managed = session in managed if managed else (session != manager_session)
-        role = "manager" if session == manager_session else "work"
-        print(f"{session:<24} {('yes' if is_managed else 'no'):<7} {role:<10}")
-    return 0
-
-
-def run_fleet_set(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    sessions = split_csv(args.sessions)
-    if not sessions:
-        raise ValueError("Pass --sessions s1,s2,...")
-
-    running = set(list_tmux_sessions())
-    missing = [name for name in sessions if name not in running]
-    if missing and not args.allow_missing:
-        raise ValueError(
-            "Session(s) not running: {vals}. Use --allow-missing to store anyway.".format(vals=", ".join(missing))
-        )
-
-    fleet = store.setdefault("fleet", {})
-    fleet["managed_sessions"] = sorted(set(sessions))
-    if args.manager_session:
-        fleet["manager_session"] = args.manager_session
-    if args.manager_window:
-        fleet["manager_window"] = args.manager_window
-    save_store(store)
-
-    print("Saved managed fleet sessions: " + ", ".join(fleet["managed_sessions"]))
-    print(
-        "Manager target: {session}:{window}".format(
-            session=fleet.get("manager_session", DEFAULT_FLEET_MANAGER_SESSION),
-            window=fleet.get("manager_window", DEFAULT_FLEET_MANAGER_WINDOW),
-        )
-    )
-    return 0
-
-
-def run_fleet_clear(_: argparse.Namespace) -> int:
-    store = load_store()
-    fleet = store.setdefault("fleet", {})
-    fleet["managed_sessions"] = []
-    save_store(store)
-    print("Cleared managed fleet sessions. Fleet commands will auto-target all running tmux sessions.")
-    return 0
-
 
 def run_profile_list(_: argparse.Namespace) -> int:
     store = load_store()
@@ -1922,8 +1741,6 @@ def run_profile_save(args: argparse.Namespace) -> int:
         raise ValueError("Profile name is required")
 
     sessions = split_csv(args.sessions)
-    if not sessions:
-        sessions = store_managed_sessions(store)
     if not sessions and args.auto_running:
         sessions = [s for s in list_tmux_sessions() if s]
 
@@ -1951,357 +1768,14 @@ def run_profile_use(args: argparse.Namespace) -> int:
 
     profiles["current"] = name
     item = items.get(name, {})
-    sessions = item.get("managed_sessions", []) if isinstance(item.get("managed_sessions"), list) else []
-    if sessions:
-        fleet = store.setdefault("fleet", {})
-        fleet["managed_sessions"] = sorted(set(str(s).strip() for s in sessions if str(s).strip()))
     save_store(store)
 
     print(f"Active profile: {name}")
     print(f"- max_panes: {int(item.get('max_panes') or 10)}")
-    print(f"- managed_sessions: {', '.join(sessions) if sessions else '-'}")
     print(f"- start hint: AW_MAX_PANES={int(item.get('max_panes') or 10)} ./scripts/agent-wrangler start")
     return 0
 
 
-def run_fleet_status(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    sessions = resolve_fleet_sessions(
-        store=store,
-        explicit_csv=args.sessions,
-        pattern=args.pattern,
-        include_manager=args.include_manager,
-    )
-    if not sessions:
-        print("No fleet sessions found. Start a team session or configure with: agent-wrangler fleet set --sessions ...")
-        return 0
-
-    rows = fleet_health_rows(
-        sessions=sessions,
-        capture_lines=args.capture_lines,
-        wait_attention_min=args.wait_attention_min,
-
-    )
-    totals = {
-        "sessions": len(rows),
-        "panes": sum(int(row.get("panes") or 0) for row in rows),
-        "attention": sum(int(row.get("attention") or 0) for row in rows),
-        "waiting": sum(int(row.get("waiting") or 0) for row in rows),
-        "active": sum(int(row.get("active") or 0) for row in rows),
-        "red": sum(int(row.get("red") or 0) for row in rows),
-        "yellow": sum(int(row.get("yellow") or 0) for row in rows),
-        "green": sum(int(row.get("green") or 0) for row in rows),
-    }
-
-    print(
-        "[{ts}] Fleet status  sessions={sessions} panes={panes} attention={attention} waiting={waiting} active={active}".format(
-            ts=now_iso(),
-            sessions=totals["sessions"],
-            panes=totals["panes"],
-            attention=totals["attention"],
-            waiting=totals["waiting"],
-            active=totals["active"],
-        )
-    )
-    print_fleet_table(rows)
-    print("")
-    print(
-        "Color totals: red={red} yellow={yellow} green={green}".format(
-            red=totals["red"],
-            yellow=totals["yellow"],
-            green=totals["green"],
-        )
-    )
-    return 0
-
-
-def run_fleet_watch(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    loops = 0
-    interval = max(1, int(args.interval))
-    try:
-        while True:
-            store = load_store()
-            sessions = resolve_fleet_sessions(
-                store=store,
-                explicit_csv=args.sessions,
-                pattern=args.pattern,
-                include_manager=args.include_manager,
-            )
-            rows = fleet_health_rows(
-                sessions=sessions,
-                capture_lines=args.capture_lines,
-                wait_attention_min=args.wait_attention_min,
-        
-            )
-            if not args.no_clear:
-                print("\033[2J\033[H", end="")
-            totals = {
-                "sessions": len(rows),
-                "panes": sum(int(row.get("panes") or 0) for row in rows),
-                "attention": sum(int(row.get("attention") or 0) for row in rows),
-                "waiting": sum(int(row.get("waiting") or 0) for row in rows),
-                "active": sum(int(row.get("active") or 0) for row in rows),
-            }
-            print(
-                "[{ts}] Agent Wrangler Fleet  sessions={sessions} panes={panes} attention={attention} waiting={waiting} active={active}".format(
-                    ts=now_iso(),
-                    sessions=totals["sessions"],
-                    panes=totals["panes"],
-                    attention=totals["attention"],
-                    waiting=totals["waiting"],
-                    active=totals["active"],
-                )
-            )
-            if not sessions:
-                print("No sessions matched. Use `agent-wrangler fleet set --sessions ...` or start tmux sessions.")
-            else:
-                print_fleet_table(rows)
-            print("")
-            print("Control: agent-wrangler fleet focus <session> | agent-wrangler fleet status | agent-wrangler drift --fleet")
-
-            loops += 1
-            if args.iterations > 0 and loops >= args.iterations:
-                break
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        return 0
-    return 0
-
-
-def run_fleet_manager(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    fleet_cfg = store.setdefault("fleet", {})
-    manager_session = args.manager_session or str(fleet_cfg.get("manager_session") or DEFAULT_FLEET_MANAGER_SESSION)
-    manager_window = args.window or str(fleet_cfg.get("manager_window") or DEFAULT_FLEET_MANAGER_WINDOW)
-    if args.update_defaults:
-        fleet_cfg["manager_session"] = manager_session
-        fleet_cfg["manager_window"] = manager_window
-        save_store(store)
-
-    script = Path(__file__).resolve()
-    cmd_parts = [
-        "python3",
-        shlex.quote(str(script)),
-        "teams",
-        "fleet",
-        "watch",
-        "--interval",
-        str(max(1, int(args.interval))),
-        "--capture-lines",
-        str(max(20, int(args.capture_lines))),
-        "--wait-attention-min",
-        str(max(0, int(args.wait_attention_min))),
-    ]
-    if args.sessions:
-        cmd_parts.extend(["--sessions", shlex.quote(args.sessions)])
-    if args.pattern:
-        cmd_parts.extend(["--pattern", shlex.quote(args.pattern)])
-    if args.include_manager:
-        cmd_parts.append("--include-manager")
-    if args.no_colorize:
-        cmd_parts.append("--no-colorize")
-    shell_tail = "; EXIT_CODE=$?; echo fleet_manager_exited:$EXIT_CODE; exec zsh"
-    shell_command = "zsh -lc " + shlex.quote(" ".join(cmd_parts) + shell_tail)
-
-    if not session_exists(manager_session):
-        code, _, err = tmux(
-            [
-                "new-session",
-                "-d",
-                "-s",
-                manager_session,
-                "-n",
-                manager_window,
-                "-x",
-                "260",
-                "-y",
-                "90",
-                "-c",
-                str(ROOT),
-                shell_command,
-            ],
-            timeout=10,
-        )
-        if code != 0:
-            raise ValueError(err.strip() or f"failed to create manager session '{manager_session}'")
-    else:
-        if manager_window_exists(manager_session, manager_window):
-            if args.replace:
-                code, _, err = tmux(["kill-window", "-t", f"{manager_session}:{manager_window}"], timeout=5)
-                if code != 0:
-                    raise ValueError(err.strip() or f"failed to replace fleet manager window '{manager_window}'")
-            else:
-                print(f"Fleet manager window '{manager_window}' already exists.")
-        if not manager_window_exists(manager_session, manager_window):
-            code, _, err = tmux(
-                ["new-window", "-d", "-t", manager_session, "-n", manager_window, "-c", str(ROOT), shell_command],
-                timeout=8,
-            )
-            if code != 0:
-                raise ValueError(err.strip() or f"failed to create fleet manager window '{manager_window}'")
-
-    if args.focus:
-        tmux(["select-window", "-t", f"{manager_session}:{manager_window}"], timeout=5)
-    print(f"Fleet manager ready: {manager_session}:{manager_window}")
-    if args.attach:
-        return attach_session(manager_session)
-    return 0
-
-
-def run_fleet_focus(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    target = args.session_name
-    if not session_exists(target):
-        raise ValueError(f"Session '{target}' does not exist")
-
-    if os.environ.get("TMUX"):
-        code, _, _ = tmux(["switch-client", "-t", target], timeout=5)
-        if code == 0:
-            print(f"switched tmux client to session '{target}'")
-            return 0
-
-    return attach_session(target)
-
-
-def run_fleet_jump(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    sessions = resolve_fleet_sessions(
-        store=store,
-        explicit_csv=args.sessions,
-        pattern=args.pattern,
-        include_manager=args.include_manager,
-    )
-    if not sessions:
-        print("No sessions available for jump.")
-        return 0
-
-    if args.session_name:
-        target = args.session_name.strip()
-        if target not in sessions:
-            known = ", ".join(sessions)
-            raise ValueError(f"Session '{target}' is not in current fleet set. Known: {known}")
-        return run_fleet_focus(argparse.Namespace(session_name=target))
-
-    if args.fzf:
-        if not shutil.which("fzf"):
-            raise ValueError("fzf is not installed. Install with: brew install fzf")
-
-        rows = fleet_health_rows(
-            sessions=sessions,
-            capture_lines=max(20, int(args.capture_lines)),
-            wait_attention_min=max(0, int(args.wait_attention_min)),
-    
-        )
-        line_rows: list[str] = []
-        for row in rows:
-            line_rows.append(
-                "{session}\tattn={attention}\twait={waiting}\tact={active}\tred={red}\t{reason}".format(
-                    session=str(row.get("session") or "-"),
-                    attention=int(row.get("attention") or 0),
-                    waiting=int(row.get("waiting") or 0),
-                    active=int(row.get("active") or 0),
-                    red=int(row.get("red") or 0),
-                    reason=str(row.get("top_reason") or row.get("error") or "-"),
-                )
-            )
-
-        proc = subprocess.run(
-            [
-                "fzf",
-                "--prompt",
-                "fleet> ",
-                "--layout",
-                "reverse",
-                "--height",
-                "60%",
-                "--border",
-                "--delimiter",
-                "\t",
-                "--with-nth",
-                "1,2,3,4,5,6",
-                "--header",
-                "SESSION\tATTN\tWAIT\tACTIVE\tRED\tTOP_REASON",
-            ],
-            input="\n".join(line_rows),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-        if proc.returncode != 0:
-            if proc.returncode == 130:
-                print("jump cancelled")
-                return 0
-            detail = (proc.stderr or "").strip()
-            raise ValueError(detail or "fzf selection failed")
-
-        chosen = (proc.stdout or "").strip()
-        if not chosen:
-            print("jump cancelled")
-            return 0
-        target = chosen.split("\t", 1)[0].strip()
-        if not target:
-            print("jump cancelled")
-            return 0
-        return run_fleet_focus(argparse.Namespace(session_name=target))
-
-    if os.environ.get("TMUX"):
-        # Native tmux picker for fastest in-client jump navigation.
-        code, _, err = tmux(["choose-tree", "-Zw"], timeout=20)
-        if code != 0:
-            raise ValueError(err.strip() or "failed to open tmux choose-tree")
-        return 0
-
-    print("Jump picker is best inside tmux.")
-    print("Use one of:")
-    for session in sessions:
-        print(f"- agent-wrangler fleet jump --session-name {session}")
-    return 0
-
-
-def run_fleet_popup(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    if not os.environ.get("TMUX"):
-        print("fleet popup requires running inside an attached tmux client.")
-        print("Fallback: agent-wrangler fleet manager --replace")
-        return 0
-
-    script = Path(__file__).resolve()
-    watch_cmd = (
-        f"python3 {shlex.quote(str(script))} teams fleet watch "
-        f"--interval {max(1, int(args.interval))} "
-        f"--capture-lines {max(20, int(args.capture_lines))} "
-        f"--wait-attention-min {max(0, int(args.wait_attention_min))}"
-    )
-    if args.sessions:
-        watch_cmd += f" --sessions {shlex.quote(args.sessions)}"
-    if args.pattern:
-        watch_cmd += f" --pattern {shlex.quote(args.pattern)}"
-    if args.include_manager:
-        watch_cmd += " --include-manager"
-    if args.no_colorize:
-        watch_cmd += " --no-colorize"
-
-    popup_cmd = "zsh -lc " + shlex.quote(watch_cmd)
-    code, _, err = tmux(
-        [
-            "display-popup",
-            "-E",
-            "-w",
-            str(max(80, int(args.width))),
-            "-h",
-            str(max(18, int(args.height))),
-            popup_cmd,
-        ],
-        timeout=20,
-    )
-    if code != 0:
-        raise ValueError(err.strip() or "failed to open fleet popup")
-    return 0
 
 
 def run_drift(args: argparse.Namespace) -> int:
@@ -2309,20 +1783,8 @@ def run_drift(args: argparse.Namespace) -> int:
     store = load_store()
     proj_map = project_map()
 
-    if args.fleet:
-        sessions = resolve_fleet_sessions(
-            store=store,
-            explicit_csv=args.sessions,
-            pattern=args.pattern,
-            include_manager=args.include_manager,
-        )
-    else:
-        session = args.session or store.get("default_session") or DEFAULT_SESSION
-        sessions = [session]
-
-    if not sessions:
-        print("No sessions selected for drift view.")
-        return 0
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    sessions = [session]
 
     total_projects = 0
     total_dirty = 0
@@ -2677,24 +2139,12 @@ def run_doctor(args: argparse.Namespace) -> int:
     ensure_tmux()
     store = load_store()
 
-    if args.fleet:
-        sessions = resolve_fleet_sessions(
-            store=store,
-            explicit_csv=args.sessions,
-            pattern=args.pattern,
-            include_manager=args.include_manager,
-        )
-    else:
-        session = args.session or store.get("default_session") or DEFAULT_SESSION
-        sessions = [session]
-
-    if not sessions:
-        print("No sessions selected for doctor.")
-        return 0
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    sessions = [session]
 
     print("Agent Wrangler Doctor")
     print("Tool availability:")
-    for tool in ["claude", "codex", "aider", "gemini", "npm", "pnpm", "bun", "fzf"]:
+    for tool in ["claude", "codex", "aider", "gemini", "npm", "pnpm", "bun"]:
         ok = "yes" if shutil.which(tool) else "no"
         print(f"- {tool:<7} installed={ok}")
 
@@ -2759,7 +2209,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     print("")
     print(f"Doctor summary: sessions={len(sessions)} findings={total_findings}")
     if total_findings > 0:
-        print("Next: fix highest-red panes, then rerun `agent-wrangler doctor --fleet`.")
+        print("Next: fix highest-red panes, then rerun `agent-wrangler doctor`.")
     return 0
 
 
@@ -2785,9 +2235,11 @@ def run_nav(args: argparse.Namespace) -> int:
         ("M-m", ["select-window", "-t", f"{session}:manager"]),
         ("M-g", ["select-window", "-t", f"{session}:grid"]),
     ]
+    exit_script = str(ROOT / "scripts" / "agent-wrangler")
     utility_bindings = [
         ("M-z", ["resize-pane", "-Z"]),          # zoom toggle
         ("M-j", ["display-panes", "-d", "2000"]),  # jump by number overlay
+        ("M-q", ["confirm-before", "-p", "Exit Agent Wrangler? (y/n)", f"run-shell '{exit_script} exit --force'"]),
     ]
     all_bindings = pane_bindings + window_bindings + index_bindings + named_window_bindings + utility_bindings
 
@@ -2799,12 +2251,19 @@ def run_nav(args: argparse.Namespace) -> int:
 
     for key, cmd in all_bindings:
         tmux(["bind-key", "-n", key, *cmd], timeout=5)
+
+    # Enable mouse: click to select pane, scroll to browse pane content (not shell history)
+    tmux(["set-option", "-g", "mouse", "on"], timeout=5)
+    # Scroll sends scroll events to the pane (enters copy mode), not Up/Down keys
+    tmux(["set-option", "-g", "terminal-overrides", "xterm*:smcup@:rmcup@"], timeout=5)
+
     print("Enabled no-prefix Alt navigation bindings.")
-    print("Pane navigation: Option+Arrow")
+    print("Pane navigation: Option+Arrow | mouse click")
     print("Window navigation: Option+[ / Option+]")
     print("Window direct jump: Option+1..9")
     print("Named windows: Option+m (manager) | Option+g (grid)")
-    print("Utilities: Option+z (zoom toggle) | Option+j (jump by number)")
+    print("Utilities: Option+z (zoom toggle) | Option+j (jump by number) | Option+q (exit)")
+    print("Mouse: click pane to select | scroll to browse output")
     return 0
 
 
@@ -2901,6 +2360,42 @@ def run_kill(args: argparse.Namespace) -> int:
     if code != 0:
         raise ValueError(err.strip() or f"failed to kill pane {pane.pane_id}")
     print(f"killed {pane.pane_id} ({pane.pane_title})")
+    return 0
+
+
+def run_exit(args: argparse.Namespace) -> int:
+    """Kill the entire Agent Wrangler tmux session."""
+    ensure_tmux()
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+
+    if not args.force:
+        # Check for running agents and warn
+        panes = list_panes(session)
+        agents = [p for p in panes if p.agent]
+        if agents:
+            names = ", ".join(f"{p.pane_title}({p.agent})" for p in agents)
+            print(f"Active agents: {names}")
+            try:
+                answer = input("Kill session and all agents? [y/N] ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 1
+            if answer.strip().lower() not in ("y", "yes"):
+                print("Aborted.")
+                return 1
+
+    # Remove nav bindings first (best-effort)
+    for key in ("M-Left", "M-Right", "M-Up", "M-Down", "M-[", "M-]",
+                "M-m", "M-g", "M-z", "M-j", "M-q"):
+        tmux(["unbind-key", "-n", key], timeout=3)
+    for idx in range(1, 10):
+        tmux(["unbind-key", "-n", f"M-{idx}"], timeout=3)
+
+    code, _, err = tmux(["kill-session", "-t", session], timeout=5)
+    if code != 0:
+        raise ValueError(err.strip() or f"failed to kill session {session}")
+    print(f"Agent Wrangler session '{session}' exited.")
     return 0
 
 
@@ -3161,6 +2656,11 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     kill.add_argument("--session", default=None)
     kill.set_defaults(handler=run_kill)
 
+    exit_cmd = teams_sub.add_parser("exit", help="Exit Agent Wrangler (kill the tmux session)")
+    exit_cmd.add_argument("--session", default=None)
+    exit_cmd.add_argument("--force", "-f", action="store_true", help="Skip confirmation even if agents are running")
+    exit_cmd.set_defaults(handler=run_exit)
+
     hide = teams_sub.add_parser("hide", help="Hide a pane (move to background, agent keeps running)")
     hide.add_argument("pane")
     hide.add_argument("--session", default=None)
@@ -3270,109 +2770,16 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     hooks_disable.set_defaults(handler=run_hooks_disable)
 
     doctor = teams_sub.add_parser("doctor", help="Diagnose broken/waiting agent panes")
-    doctor.add_argument("--session", default=None, help="Single tmux session (default: configured default_session)")
-    doctor.add_argument("--fleet", action="store_true", help="Run diagnostics across fleet sessions")
-    doctor.add_argument("--sessions", help="Comma-separated sessions override for --fleet")
-    doctor.add_argument("--pattern", help="Filter fleet sessions by substring")
-    doctor.add_argument("--include-manager", action="store_true", help="Include fleet manager session in --fleet mode")
+    doctor.add_argument("--session", default=None, help="Tmux session (default: configured default_session)")
     doctor.add_argument("--capture-lines", type=int, default=120, help="Recent pane lines to inspect for issues")
     doctor.add_argument("--wait-attention-min", type=int, default=1, help="Waiting threshold in minutes")
     doctor.add_argument("--only-attention", action="store_true", help="Only print panes that need attention")
     doctor.set_defaults(handler=run_doctor)
 
-    drift = teams_sub.add_parser("drift", help="Show git drift for pane projects (AOE-style)")
-    drift.add_argument("--session", default=None, help="Single tmux session (default: configured default_session)")
-    drift.add_argument("--fleet", action="store_true", help="Run drift check across fleet sessions")
-    drift.add_argument("--sessions", help="Comma-separated sessions override for --fleet")
-    drift.add_argument("--pattern", help="Filter fleet sessions by substring")
-    drift.add_argument("--include-manager", action="store_true", help="Include fleet manager session in --fleet mode")
+    drift = teams_sub.add_parser("drift", help="Show git drift for pane projects")
+    drift.add_argument("--session", default=None, help="Tmux session (default: configured default_session)")
     drift.add_argument("--alert-dirty", type=int, default=25, help="Dirty-file threshold for high-drift alerts")
     drift.set_defaults(handler=run_drift)
-
-    fleet = teams_sub.add_parser("fleet", help="Multi-session orchestrator for all team grids")
-    fleet_sub = fleet.add_subparsers(dest="fleet_command", required=True)
-
-    fleet_list = fleet_sub.add_parser("list", help="List running tmux sessions and managed fleet set")
-    fleet_list.set_defaults(handler=run_fleet_list)
-
-    fleet_set = fleet_sub.add_parser("set", help="Persist managed fleet sessions")
-    fleet_set.add_argument("--sessions", required=True, help="Comma-separated tmux session names")
-    fleet_set.add_argument("--allow-missing", action="store_true", help="Allow storing sessions not currently running")
-    fleet_set.add_argument("--manager-session", help="Default fleet manager tmux session name")
-    fleet_set.add_argument("--manager-window", help="Default fleet manager window name")
-    fleet_set.set_defaults(handler=run_fleet_set)
-
-    fleet_clear = fleet_sub.add_parser("clear", help="Clear managed fleet sessions (fallback to all running)")
-    fleet_clear.set_defaults(handler=run_fleet_clear)
-
-    fleet_status = fleet_sub.add_parser("status", help="One-shot fleet health rollup")
-    fleet_status.add_argument("--sessions", help="Comma-separated session override")
-    fleet_status.add_argument("--pattern", help="Filter sessions by substring")
-    fleet_status.add_argument("--include-manager", action="store_true")
-    fleet_status.add_argument("--capture-lines", type=int, default=80)
-    fleet_status.add_argument("--wait-attention-min", type=int, default=1)
-    fleet_status.add_argument("--no-colorize", action="store_true")
-    fleet_status.set_defaults(handler=run_fleet_status)
-
-    fleet_watch = fleet_sub.add_parser("watch", help="Live fleet manager loop across sessions")
-    fleet_watch.add_argument("--sessions", help="Comma-separated session override")
-    fleet_watch.add_argument("--pattern", help="Filter sessions by substring")
-    fleet_watch.add_argument("--include-manager", action="store_true")
-    fleet_watch.add_argument("--capture-lines", type=int, default=80)
-    fleet_watch.add_argument("--wait-attention-min", type=int, default=1)
-    fleet_watch.add_argument("--interval", type=int, default=3)
-    fleet_watch.add_argument("--iterations", type=int, default=0, help="0 means infinite")
-    fleet_watch.add_argument("--no-colorize", action="store_true")
-    fleet_watch.add_argument("--no-clear", action="store_true")
-    fleet_watch.set_defaults(handler=run_fleet_watch)
-
-    fleet_manager = fleet_sub.add_parser("manager", help="Create/open dedicated fleet manager tmux session")
-    fleet_manager.add_argument("--manager-session", default=None, help="Fleet manager tmux session name")
-    fleet_manager.add_argument("--window", default=None, help="Fleet manager window name")
-    fleet_manager.add_argument("--sessions", help="Comma-separated session override for manager watch loop")
-    fleet_manager.add_argument("--pattern", help="Filter sessions by substring for manager watch loop")
-    fleet_manager.add_argument("--include-manager", action="store_true")
-    fleet_manager.add_argument("--capture-lines", type=int, default=80)
-    fleet_manager.add_argument("--wait-attention-min", type=int, default=1)
-    fleet_manager.add_argument("--interval", type=int, default=3)
-    fleet_manager.add_argument("--replace", action="store_true")
-    fleet_manager.add_argument("--no-colorize", action="store_true")
-    fleet_manager.add_argument("--focus", action="store_true", default=True)
-    fleet_manager.add_argument("--no-focus", dest="focus", action="store_false")
-    fleet_manager.add_argument("--attach", action="store_true", default=True)
-    fleet_manager.add_argument("--no-attach", dest="attach", action="store_false")
-    fleet_manager.add_argument(
-        "--update-defaults",
-        action="store_true",
-        help="Persist manager session/window defaults to team_grid.json",
-    )
-    fleet_manager.set_defaults(handler=run_fleet_manager)
-
-    fleet_focus = fleet_sub.add_parser("focus", help="Switch/attach to a target tmux session")
-    fleet_focus.add_argument("session_name")
-    fleet_focus.set_defaults(handler=run_fleet_focus)
-
-    fleet_jump = fleet_sub.add_parser("jump", help="Fast jump between sessions (choose-tree inside tmux)")
-    fleet_jump.add_argument("--session-name", help="Jump directly to a specific session")
-    fleet_jump.add_argument("--sessions", help="Comma-separated session override")
-    fleet_jump.add_argument("--pattern", help="Filter sessions by substring")
-    fleet_jump.add_argument("--include-manager", action="store_true")
-    fleet_jump.add_argument("--fzf", action="store_true", help="Use fzf selector (inside or outside tmux)")
-    fleet_jump.add_argument("--capture-lines", type=int, default=40, help="Capture lines for attention context in fzf mode")
-    fleet_jump.add_argument("--wait-attention-min", type=int, default=1, help="Waiting threshold in minutes for fzf mode")
-    fleet_jump.set_defaults(handler=run_fleet_jump)
-
-    fleet_popup = fleet_sub.add_parser("popup", help="Open fleet watch in a tmux popup")
-    fleet_popup.add_argument("--sessions", help="Comma-separated session override")
-    fleet_popup.add_argument("--pattern", help="Filter sessions by substring")
-    fleet_popup.add_argument("--include-manager", action="store_true")
-    fleet_popup.add_argument("--capture-lines", type=int, default=80)
-    fleet_popup.add_argument("--wait-attention-min", type=int, default=1)
-    fleet_popup.add_argument("--interval", type=int, default=3)
-    fleet_popup.add_argument("--width", type=int, default=220, help="Popup width (cells)")
-    fleet_popup.add_argument("--height", type=int, default=50, help="Popup height (cells)")
-    fleet_popup.add_argument("--no-colorize", action="store_true")
-    fleet_popup.set_defaults(handler=run_fleet_popup)
 
 
 def main() -> int:

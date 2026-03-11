@@ -6,13 +6,6 @@
     "api-server",
     "side-project"
   ],
-  "fleet": {
-    "managed_sessions": [
-      "agent-grid"
-    ],
-    "manager_session": "wrangler-hq",
-    "manager_window": "fleet"
-  },
   "persistence": {
     "enabled": false,
     "autosave_minutes": 15
@@ -21,9 +14,6 @@
     "current": "default",
     "items": {
       "default": {
-        "managed_sessions": [
-          "agent-grid"
-        ],
         "max_panes": 10
       }
     }

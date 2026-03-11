@@ -37,7 +37,6 @@ Agent Wrangler gives you a tmux grid where each pane is a project with an AI age
 
 ```bash
 brew install tmux
-brew install fzf          # optional, for fuzzy-find
 
 git clone https://github.com/YOUR_USER/agent-wrangler.git
 cd agent-wrangler
@@ -99,6 +98,9 @@ This does everything:
 | `Option+z` | Zoom current pane to fullscreen (toggle) |
 | `Option+j` | Jump to pane by number |
 | `Option+[` / `]` | Previous / next window |
+| `Option+q` | Exit Agent Wrangler |
+| **Mouse click** | Select a pane |
+| **Mouse scroll** | Scroll pane output |
 
 ## Control agents
 
@@ -159,17 +161,6 @@ Open with `./scripts/agent-wrangler grid`. A curses UI for quick pane management
 | `s` | Send a command |
 | `K` | Send Ctrl-C |
 | `q` | Quit |
-
-## Fleet (multi-session)
-
-Managing multiple tmux sessions? Fleet gives you a unified view:
-
-```bash
-./scripts/agent-wrangler fleet set --sessions grid-1,grid-2
-./scripts/agent-wrangler fleet status
-./scripts/agent-wrangler fleet watch --interval 3
-./scripts/agent-wrangler fleet jump --fzf
-```
 
 ## How it works
 

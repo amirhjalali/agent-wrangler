@@ -47,9 +47,9 @@ def default_program() -> dict[str, Any]:
                 "kpi": "Readiness score >= 92 for 7 consecutive days.",
             },
             {
-                "id": "fleet-warden",
+                "id": "grid-warden",
                 "title": "Runtime Reliability",
-                "mission": "Keep fleet manager healthy and attention queue under strict control.",
+                "mission": "Keep grid healthy and attention queue under strict control.",
                 "kpi": "Attention count <= 1 and red panes <= 1.",
             },
             {
@@ -79,18 +79,18 @@ def default_program() -> dict[str, Any]:
         ],
         "loops": [
             {
-                "id": "fleet-heartbeat",
-                "owner": "fleet-warden",
+                "id": "grid-heartbeat",
+                "owner": "grid-warden",
                 "cadence": "every 3 minutes",
                 "goal": "Detect attention spikes and session health regressions quickly.",
-                "entry_command": "agent-wrangler fleet watch --interval 3",
+                "entry_command": "agent-wrangler watch --interval 3",
             },
             {
                 "id": "drift-sweep",
                 "owner": "repo-sheriff",
                 "cadence": "every 30 minutes",
                 "goal": "Keep dirty-tree growth bounded and visible.",
-                "entry_command": "agent-wrangler drift --fleet --alert-dirty 25",
+                "entry_command": "agent-wrangler drift --alert-dirty 25",
             },
             {
                 "id": "hardening-loop",
@@ -112,7 +112,7 @@ def default_program() -> dict[str, Any]:
                 "id": "phase-1",
                 "name": "Operational Hardening",
                 "definition_of_done": [
-                    "fleet manager runs reliably for full workday",
+                    "grid runs reliably for full workday",
                     "attention queue remains <= 1 for most cycles",
                     "no blocking pane-creation/layout regressions",
                 ],
@@ -122,7 +122,7 @@ def default_program() -> dict[str, Any]:
                 "name": "Impeccable UX",
                 "definition_of_done": [
                     "primary flows fit in 1-2 commands",
-                    "fleet and drift outputs are readable at a glance",
+                    "status and drift outputs are readable at a glance",
                     "operator can jump to any session quickly",
                 ],
             },
@@ -141,7 +141,7 @@ def default_program() -> dict[str, Any]:
                 "definition_of_done": [
                     "readiness score >= 92 for 7 consecutive days",
                     "high drift remains <= 1 project",
-                    "fleet attention remains <= 1 without constant manual babysitting",
+                    "grid attention remains <= 1 without constant manual babysitting",
                 ],
             },
         ],
@@ -195,9 +195,7 @@ def save_program(program: dict[str, Any]) -> None:
 
 
 def add_signal_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--sessions", help="Comma-separated fleet sessions override")
-    parser.add_argument("--pattern", help="Filter sessions by substring")
-    parser.add_argument("--include-manager", action="store_true", help="Include fleet manager session")
+    parser.add_argument("--session", help="Tmux session override")
     parser.add_argument("--capture-lines", type=int, default=80)
     parser.add_argument("--wait-attention-min", type=int, default=1)
     parser.add_argument("--alert-dirty", type=int, default=25)
@@ -205,37 +203,39 @@ def add_signal_args(parser: argparse.ArgumentParser) -> None:
 
 def collect_signals(args: argparse.Namespace, store: dict[str, Any]) -> dict[str, Any]:
     tmux_teams.ensure_tmux()
-    sessions = tmux_teams.resolve_fleet_sessions(
-        store=store,
-        explicit_csv=args.sessions,
-        pattern=args.pattern,
-        include_manager=args.include_manager,
-    )
-    rows = tmux_teams.fleet_health_rows(
-        sessions=sessions,
-        capture_lines=max(20, int(args.capture_lines)),
-        wait_attention_min=max(0, int(args.wait_attention_min)),
-        apply_colors=False,
-    )
+    session = getattr(args, "session", None) or store.get("default_session") or "agent-grid"
+    sessions = [session] if tmux_teams.session_exists(session) else []
+
+    row: dict[str, Any] = {}
+    if sessions:
+        try:
+            row = tmux_teams.session_health_summary(
+                session=session,
+                capture_lines=max(20, int(args.capture_lines)),
+                wait_attention_min=max(0, int(args.wait_attention_min)),
+            )
+        except ValueError:
+            pass
+    rows = [row] if row else []
 
     totals = {
-        "sessions": len(rows),
-        "panes": sum(int(row.get("panes") or 0) for row in rows),
-        "attention": sum(int(row.get("attention") or 0) for row in rows),
-        "waiting": sum(int(row.get("waiting") or 0) for row in rows),
-        "active": sum(int(row.get("active") or 0) for row in rows),
-        "red": sum(int(row.get("red") or 0) for row in rows),
-        "yellow": sum(int(row.get("yellow") or 0) for row in rows),
-        "green": sum(int(row.get("green") or 0) for row in rows),
+        "sessions": len(sessions),
+        "panes": int(row.get("panes") or 0) if row else 0,
+        "attention": int(row.get("attention") or 0) if row else 0,
+        "waiting": int(row.get("waiting") or 0) if row else 0,
+        "active": int(row.get("active") or 0) if row else 0,
+        "red": int(row.get("red") or 0) if row else 0,
+        "yellow": int(row.get("yellow") or 0) if row else 0,
+        "green": int(row.get("green") or 0) if row else 0,
     }
 
     proj_map = tmux_teams.project_map()
     drift_rows: list[dict[str, Any]] = []
-    for session in sessions:
-        if not tmux_teams.session_exists(session):
+    for sess in sessions:
+        if not tmux_teams.session_exists(sess):
             continue
         try:
-            projects = tmux_teams.project_rows_for_session(session, proj_map)
+            projects = tmux_teams.project_rows_for_session(sess, proj_map)
         except ValueError:
             continue
         for item in projects:
@@ -243,7 +243,7 @@ def collect_signals(args: argparse.Namespace, store: dict[str, Any]) -> dict[str
             dirty = int(git.get("dirty") or 0) if isinstance(git, dict) else 0
             drift_rows.append(
                 {
-                    "session": session,
+                    "session": sess,
                     "project_id": str(item.get("project_id") or "-"),
                     "path": str(item.get("path") or "-"),
                     "dirty": dirty,
@@ -257,10 +257,6 @@ def collect_signals(args: argparse.Namespace, store: dict[str, Any]) -> dict[str
     high_drift = [item for item in drift_rows if int(item.get("dirty") or 0) >= int(args.alert_dirty)]
     high_drift.sort(key=lambda item: int(item.get("dirty") or 0), reverse=True)
 
-    fleet_cfg = store.get("fleet", {})
-    manager_session = str(fleet_cfg.get("manager_session") or tmux_teams.DEFAULT_FLEET_MANAGER_SESSION)
-    manager_running = bool(manager_session and tmux_teams.session_exists(manager_session))
-
     return {
         "generated_at": now_iso(),
         "sessions": sessions,
@@ -269,8 +265,8 @@ def collect_signals(args: argparse.Namespace, store: dict[str, Any]) -> dict[str
         "drift_rows": drift_rows,
         "dirty_total": dirty_total,
         "high_drift": high_drift,
-        "manager_session": manager_session,
-        "manager_running": manager_running,
+        "manager_session": session,
+        "manager_running": bool(sessions),
     }
 
 
@@ -335,7 +331,7 @@ def build_gates(program: dict[str, Any], metrics: dict[str, Any], score: int) ->
     gates: list[dict[str, Any]] = []
     gates.append(
         {
-            "id": "fleet-control",
+            "id": "grid-control",
             "name": "Fleet Control",
             "pass": sessions > 0 and manager_running and attention <= int(targets.get("max_attention", 1)),
             "detail": f"sessions={sessions} manager_running={manager_running} attention={attention}",
@@ -386,13 +382,13 @@ def build_actions(program: dict[str, Any], metrics: dict[str, Any], gates: list[
     high_drift = list(metrics.get("high_drift", []))
     manager_session = metrics.get("manager_session")
 
-    if not by_id["fleet-control"]["pass"]:
+    if not by_id["grid-control"]["pass"]:
         actions.append(
             {
                 "priority": "P0",
-                "owner": "fleet-warden",
-                "title": "Stabilize fleet control surface",
-                "command": "agent-wrangler fleet manager --replace --update-defaults",
+                "owner": "grid-warden",
+                "title": "Stabilize grid control surface",
+                "command": "agent-wrangler manager --replace",
                 "success": "Fleet manager running with attention <= target.",
             }
         )
@@ -401,9 +397,9 @@ def build_actions(program: dict[str, Any], metrics: dict[str, Any], gates: list[
         actions.append(
             {
                 "priority": "P0",
-                "owner": "fleet-warden",
+                "owner": "grid-warden",
                 "title": "Triage attention hotspots",
-                "command": "agent-wrangler fleet status",
+                "command": "agent-wrangler status",
                 "success": "All critical red panes acknowledged with fix or stop action.",
             }
         )
@@ -415,7 +411,7 @@ def build_actions(program: dict[str, Any], metrics: dict[str, Any], gates: list[
                 "priority": "P1",
                 "owner": "repo-sheriff",
                 "title": f"Reduce drift in {top.get('project_id')}",
-                "command": f"agent-wrangler drift --fleet --alert-dirty {int(top.get('dirty') or 25)}",
+                "command": f"agent-wrangler drift --alert-dirty {int(top.get('dirty') or 25)}",
                 "success": "High-drift project count reduced to target.",
             }
         )
@@ -490,7 +486,7 @@ def evaluate_phases(program: dict[str, Any], metrics: dict[str, Any], gates: lis
     score_gate = bool(gm.get("readiness"))
     hygiene_gate = bool(gm.get("repo-hygiene"))
     loop_gate = bool(gm.get("loop-cadence"))
-    fleet_gate = bool(gm.get("fleet-control"))
+    grid_gate = bool(gm.get("grid-control"))
     runtime_gate = bool(gm.get("runtime-health"))
 
     statuses: list[dict[str, Any]] = []
@@ -498,15 +494,15 @@ def evaluate_phases(program: dict[str, Any], metrics: dict[str, Any], gates: lis
         {
             "id": "phase-1",
             "name": "Operational Hardening",
-            "pass": fleet_gate and runtime_gate and sessions > 0,
-            "detail": f"fleet={fleet_gate} runtime={runtime_gate} sessions={sessions}",
+            "pass": grid_gate and runtime_gate and sessions > 0,
+            "detail": f"grid={grid_gate} runtime={runtime_gate} sessions={sessions}",
         }
     )
     statuses.append(
         {
             "id": "phase-2",
             "name": "Impeccable UX",
-            "pass": fleet_gate and runtime_gate and attention <= 2 and red <= 1 and waiting <= 3,
+            "pass": grid_gate and runtime_gate and attention <= 2 and red <= 1 and waiting <= 3,
             "detail": f"attention={attention} red={red} waiting={waiting}",
         }
     )
@@ -926,24 +922,6 @@ def apply_guardrails(
 
 def run_safe_apply(metrics: dict[str, Any], args: argparse.Namespace) -> tuple[list[str], list[dict[str, Any]]]:
     actions: list[str] = []
-    if not metrics.get("manager_running"):
-        ns = argparse.Namespace(
-            manager_session=metrics.get("manager_session"),
-            window=tmux_teams.DEFAULT_FLEET_MANAGER_WINDOW,
-            sessions=None,
-            pattern=None,
-            include_manager=False,
-            capture_lines=80,
-            wait_attention_min=1,
-            interval=3,
-            replace=False,
-            no_colorize=False,
-            focus=False,
-            attach=False,
-            update_defaults=False,
-        )
-        tmux_teams.run_fleet_manager(ns)
-        actions.append(f"started manager session {metrics.get('manager_session')}")
 
     for session in list(metrics.get("sessions", [])):
         if not tmux_teams.session_exists(str(session)):
@@ -954,7 +932,7 @@ def run_safe_apply(metrics: dict[str, Any], args: argparse.Namespace) -> tuple[l
             wait_attention_min=max(0, int(args.wait_attention_min)),
             apply_colors=True,
         )
-    actions.append("repainted fleet pane health styles")
+    actions.append("repainted pane health styles")
 
     guardrail_results = apply_guardrails(
         max_ai_sessions=max(1, int(args.max_ai_sessions)),
