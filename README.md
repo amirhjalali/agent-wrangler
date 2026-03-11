@@ -1,400 +1,214 @@
-# Agent Wrangler
+```
+   █████   ██████  ███████ ███    ██ ████████            ▄███▄
+  ██   ██ ██       ██      ████   ██    ██             ▄███████▄
+  ███████ ██   ███ █████   ██ ██  ██    ██       ▄▀▀▀▀███████████▀▀▀▀▄
+  ██   ██ ██    ██ ██      ██  ██ ██    ██        ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  ██   ██  ██████  ███████ ██   ████    ██
 
-A machine-level control layer for managing many repos, terminals, and Linear queues without losing context.
-
-## Getting Started Guide
-
-From a fresh terminal:
-
-```bash
-cd /Users/amirjalali/agent-wrangler
+  ██     ██ ██████   █████  ███    ██  ██████  ██      ███████ ██████
+  ██     ██ ██   ██ ██   ██ ████   ██ ██       ██      ██      ██   ██
+  ██  █  ██ ██████  ███████ ██ ██  ██ ██   ███ ██      █████   ██████
+  ██ ███ ██ ██   ██ ██   ██ ██  ██ ██ ██    ██ ██      ██      ██   ██
+   ███ ███  ██   ██ ██   ██ ██   ████  ██████  ███████ ███████ ██   ██
 ```
 
-Prerequisites:
+# Agent Wrangler
+
+A tmux-based command center for managing teams of AI coding agents across multiple repos.
+
+Run Claude Code, Codex, Aider, or Gemini sessions side-by-side in a health-monitored grid. See which agents are active, idle, or need attention — at a glance.
+
+## What it does
+
+- **Grid view** — Tile your AI agent sessions in a tmux grid with color-coded health borders (green/yellow/red)
+- **Manager window** — Claude Code + auto-refreshing status rail showing all panes
+- **Idle detection** — Classifies each terminal as active, waiting, idle, or background by inspecting process trees
+- **Agent detection** — Automatically identifies running AI tools (claude, codex, aider, gemini)
+- **Fleet management** — Monitor multiple tmux sessions from one place
+- **Terminal import** — Import existing Ghostty tabs into the tmux grid without losing context
+- **Navigation** — Option+Arrow panes, Option+m/g windows, Option+z zoom, Option+j jump
+
+## Requirements
+
+- macOS (tested on Ghostty, works with any terminal)
+- Python 3.10+
+- tmux
 
 ```bash
 brew install tmux
-brew install fzf   # optional but recommended for fleet jump
+brew install fzf   # optional, enables fuzzy-find in fleet jump
 ```
 
-### 1) Import your current Ghostty work into tmux
+No other dependencies. Pure Python stdlib + Bash.
 
-Preview first:
-
-```bash
-./scripts/agent-wrangler import --dry-run --max-panes 10 --layout auto --preserve-duplicates
-```
-
-Create full grid + manager + nav + detected agents in one command:
+## Quick start
 
 ```bash
+git clone https://github.com/YOUR_USER/agent-wrangler.git
+cd agent-wrangler
+
+# Start everything: grid + manager + nav bindings
 ./scripts/agent-wrangler start
-```
 
-Or run the interactive operator console (single entry point):
-
-```bash
+# Or run the interactive operator console
 ./scripts/agent-wrangler ops
 ```
 
-### 2) Start the fleet command center (manager-over-managers)
+## How it works
 
-```bash
-./scripts/agent-wrangler fleet set --sessions amir-grid
-./scripts/agent-wrangler fleet manager --replace --update-defaults
-./scripts/agent-wrangler fleet status
+After `agent-wrangler start`, you get two tmux windows:
+
+**Manager** (`Option+m`) — Claude Code on the left (~75%), auto-refreshing status rail on the right (~25%). The rail shows per-pane health dots, agent type, and status.
+
+**Grid** (`Option+g`) — Tiled panes, one per project. Each pane border shows health: `●` green (ok), `⚑` yellow (attention), `✖` red (problem). Active pane gets a bright white border with `▶` marker.
+
 ```
-
-### 3) Check repo drift and attention quickly
-
-```bash
-./scripts/agent-wrangler drift --fleet --alert-dirty 25
-./scripts/agent-wrangler fleet watch --interval 3
+┌──────────────────────┬──────────────────────┐
+│ ● my-webapp          │ ⚑ api-server         │
+│                      │                      │
+│  $ claude            │  $ codex --yolo      │
+│  > working on auth   │  (waiting 3m)        │
+│                      │                      │
+├──────────────────────┼──────────────────────┤
+│ ● side-project       │ ✖ data-pipeline      │
+│                      │                      │
+│  $ aider             │  (idle 45m)          │
+│  > refactoring       │                      │
+│                      │                      │
+└──────────────────────┴──────────────────────┘
 ```
-
-### 4) Run the program engine (team + loops + phase gates)
-
-```bash
-./scripts/agent-wrangler program init
-./scripts/agent-wrangler program status
-./scripts/agent-wrangler program phases --refresh-state
-./scripts/agent-wrangler program plan --write-report
-```
-
-### 5) Run unattended loop mode
-
-Dry-run guardrails (safe):
-
-```bash
-./scripts/agent-wrangler program daemon
-```
-
-Apply guardrails (can stop overflow/waiting sessions):
-
-```bash
-./scripts/agent-wrangler program daemon --apply-guardrails
-```
-
-### 6) Fast control cheatsheet
-
-```bash
-./scripts/agent-wrangler start
-./scripts/agent-wrangler fleet jump
-./scripts/agent-wrangler fleet popup
-./scripts/agent-wrangler palette
-```
-
-## Why this exists
-
-Your current setup has strong building blocks (`agentcy`, `gabooja-agents/linear-agent`) but no single operator layer for:
-
-1. Prioritizing what should be active now.
-2. Keeping terminal contexts bounded.
-3. Unifying business and personal work streams.
-4. Preventing stale long-running contexts.
-
-## What was observed on this machine (2026-02-25)
-
-- Multiple active dev servers were detected (`3006`, `3009`, `5000`, `8080`, `3847`).
-- `gabooja-agents` had a very large dirty tree (185 files).
-- `creator-studio`, `argumend`, and `gabooja-website` also had uncommitted changes.
-- You already have a runnable Linear conductor in `gabooja-agents/linear-agent`.
-- There is no current terminal/window orchestration config (`tmux`, `zellij`, `aerospace`, `yabai`, Ghostty config).
-
-## Operating model
-
-Use this as your default daily flow:
-
-1. Start day with one command: `scripts/daily-start.sh`
-2. Work from the top 3 focus items only.
-3. Keep max active contexts:
-   - business: 3
-   - personal: 2
-4. Launch a project context with: `scripts/workflow launch <project_id>`
-5. End day by running: `scripts/workflow snapshot`
 
 ## Commands
 
-From `/Users/amirjalali/agent-wrangler`:
+### Core
 
 ```bash
-# Full snapshot + report files in reports/
-./scripts/workflow snapshot
-
-# Include both Linear workspaces (if env vars are set)
-./scripts/workflow snapshot --include-linear
-
-# Quick ranked queue
-./scripts/workflow focus --limit 6
-
-# Health checks
-./scripts/workflow doctor
-
-# Open a Ghostty context for one project
-./scripts/workflow launch creator-studio
-
-# Print launch command only
-./scripts/workflow launch creator-studio --dry-run
-
-# Discover repos not yet in projects.json
-./scripts/workflow discover --scan-root /Users/amirjalali --max-depth 3
-
-# Discovery with JSON report output
-./scripts/workflow discover --scan-root /Users/amirjalali --max-depth 3 --write-report
+./scripts/agent-wrangler start          # Full startup: grid + manager + nav
+./scripts/agent-wrangler ops            # Interactive operator menu
+./scripts/agent-wrangler status         # Pane health overview
+./scripts/agent-wrangler watch          # Live-updating health table
+./scripts/agent-wrangler grid           # Curses pane browser
 ```
 
-## Agent Wrangler UI (Gastown + Ant Farm)
-
-The main UI is now a lightweight command center:
+### Agent control
 
 ```bash
-# One-shot combined view
-./scripts/agent-wrangler dashboard
-
-# Fullscreen command-center UI (recommended)
-./scripts/agent-wrangler ui
-
-# Live combined view
-./scripts/agent-wrangler watch --interval 10
-
-# Planning board lanes and cards
-./scripts/agent-wrangler gastown list --open-only --verbose
-./scripts/agent-wrangler gastown add --title "Stabilize creator deploy" --repo creator-studio --lane now --step "Audit dirty files" --step "Split into 2 PRs" --step "Run tests and deploy"
-./scripts/agent-wrangler gastown move GAS-001 --lane next
-./scripts/agent-wrangler gastown step-done GAS-001 --step 1
-./scripts/agent-wrangler gastown block GAS-002 --on GAS-001
-
-# Runtime monitor and guardrails
-./scripts/agent-wrangler antfarm status --source ghostty
-./scripts/agent-wrangler antfarm overnight --iterations 1
-./scripts/agent-wrangler antfarm overnight --apply --iterations 1
-
-# Quick shortcut list
-./scripts/agent-wrangler palette
+./scripts/agent-wrangler agent my-webapp claude       # Launch Claude in a pane
+./scripts/agent-wrangler agent api-server codex       # Launch Codex in a pane
+./scripts/agent-wrangler send my-webapp --command "git status"
+./scripts/agent-wrangler stop my-webapp               # Send Ctrl-C
+./scripts/agent-wrangler capture my-webapp --lines 40  # Grab scrollback
 ```
 
-`agent-wrangler` and `termwatch` classify mixed agent sessions (`claude`, `codex`, `aider`, `gemini`) in the same Ghostty tab set.
-
-`agent-wrangler ui` keys:
-- `tab`: switch between `Wrangler` and `Panels` pages
-- `left` or `w`: go to `Wrangler` page
-- `right` or `p`: go to `Panels` page
-- `1`: go to `Wrangler` page
-- `2`: go to `Panels` page
-- `q`: quit
-- `r`: manual refresh
-- `k` on `Wrangler`: kill oldest waiting session
-- `up/down` on `Panels`: move selected panel
-- `enter` or `f` on `Panels`: jump directly into selected tmux panel
-- `s` on `Panels`: send command to selected panel
-- `c` / `x` on `Panels`: launch `claude` / `codex` in selected panel
-- `k` on `Panels`: send Ctrl-C to selected panel
-- `i` on `Panels`: copy selected panel tty inspect command
-- `:` on `Wrangler`: command mode (`help`, `kill`, `inspect`, `open`, `plan`, `apply`)
-- `o`: run overnight guard in dry-run mode once
-- `a`: run overnight guard and apply actions once
-
-## Tmux Teams Grid (individual pane control)
-
-Use this when you want a real operator grid similar to "team sessions":
+### Grid management
 
 ```bash
-# Simplest launcher (one command)
-./scripts/agent-wrangler start
-./scripts/hq --rebuild --mode import --preserve-duplicates --max-panes 10
-./scripts/hq --rebuild --mode import --preserve-duplicates --max-panes 10 --nav --manager --manager-replace
+./scripts/agent-wrangler paint          # Color pane borders by health
+./scripts/agent-wrangler manager        # Start manager window
+./scripts/agent-wrangler rail           # Compact status sidebar
+./scripts/agent-wrangler import         # Import Ghostty tabs into tmux grid
+./scripts/agent-wrangler nav            # Enable Option+Arrow navigation
+```
 
-# Single command entrypoint (recommended)
-./scripts/agent-wrangler up --rebuild --mode import --preserve-duplicates --max-panes 10
+### Fleet (multi-session)
 
-# Manager/orchestrator screen + health coloring
-./scripts/agent-wrangler manager --replace --ui
-./scripts/agent-wrangler paint
-./scripts/agent-wrangler watch --interval 3
-
-# Fleet orchestrator (manager-over-managers across tmux sessions)
-./scripts/agent-wrangler fleet list
-./scripts/agent-wrangler fleet set --sessions amir-grid,gabooja-grid
+```bash
+./scripts/agent-wrangler fleet set --sessions my-grid
 ./scripts/agent-wrangler fleet status
 ./scripts/agent-wrangler fleet watch --interval 3
-./scripts/agent-wrangler fleet manager --replace --update-defaults
-./scripts/agent-wrangler fleet focus amir-grid
-./scripts/agent-wrangler fleet jump
-./scripts/agent-wrangler fleet jump --fzf
-./scripts/agent-wrangler fleet popup
-
-# Repo drift view (AOE-style diff/dirty awareness)
-./scripts/agent-wrangler drift
-./scripts/agent-wrangler drift --fleet --alert-dirty 25
-./scripts/agent-wrangler doctor --fleet --only-attention
-
-# Persistence (save/restore session layouts)
-./scripts/agent-wrangler persistence status
-./scripts/agent-wrangler persistence save
-./scripts/agent-wrangler persistence restore --force --attach
-
-# Profiles (switch operating modes)
-./scripts/agent-wrangler profile list
-./scripts/agent-wrangler profile save gabooja --sessions amir-grid --max-panes 12
-./scripts/agent-wrangler profile use gabooja
-
-# Hooks (event-driven repaint instead of polling-only)
-./scripts/agent-wrangler hooks enable
-./scripts/agent-wrangler hooks status
-
-# Program orchestration (team + loops + readiness gates)
-./scripts/agent-wrangler program init
-./scripts/agent-wrangler program team
-./scripts/agent-wrangler program loops
-./scripts/agent-wrangler program phases --refresh-state
-./scripts/agent-wrangler program promote
-./scripts/agent-wrangler program complete
-./scripts/agent-wrangler program status
-./scripts/agent-wrangler program plan --write-report
-./scripts/agent-wrangler program loop --iterations 1 --apply-safe --write-report
-./scripts/agent-wrangler program daemon --apply-guardrails
-./scripts/program-daemon.sh --apply-guardrails
-
-# Fast pane navigation without tmux prefix
-./scripts/agent-wrangler nav
-
-# Import your current Ghostty sessions into a dynamic tmux grid (recommended first move)
-./scripts/agent-wrangler import --max-panes 10 --layout auto --preserve-duplicates
-./scripts/agent-wrangler import --dry-run --max-panes 10 --layout auto --preserve-duplicates
-
-# Optional: also run startup commands and re-open detected agents
-./scripts/agent-wrangler import --max-panes 10 --layout auto --preserve-duplicates --startup --agent
-
-# Build a 4-pane tmux grid from selected repos
-./scripts/agent-wrangler bootstrap --projects creator-studio,gabooja-agents,agentcy,argumend --layout tiled
-
-# Attach to the grid
-./scripts/agent-wrangler attach
-
-# View pane status with agent/waiting signals
-./scripts/agent-wrangler status
-
-# Send command to a pane (index, pane id, or title/project id)
-./scripts/agent-wrangler send 0 --command "codex"
-./scripts/agent-wrangler send gabooja-agents --command "claude"
-
-# Agent shortcut per pane
-./scripts/agent-wrangler agent gabooja-agents claude
-./scripts/agent-wrangler agent creator-studio codex --flags "--yolo"
-./scripts/agent-wrangler agent creator-studio codex -- --help
-
-# Control panes individually
-./scripts/agent-wrangler stop gabooja-agents
-./scripts/agent-wrangler restart gabooja-agents
-./scripts/agent-wrangler shell gabooja-agents
-./scripts/agent-wrangler capture gabooja-agents --lines 40
-./scripts/agent-wrangler kill gabooja-agents
+./scripts/agent-wrangler fleet jump --fzf    # Fuzzy-find across sessions
+./scripts/agent-wrangler fleet popup         # Quick triage popup
 ```
 
-Single-script operations:
-- `./scripts/agent-wrangler ops`
-- Then choose actions by number (open 2-page UI, start, attach, focus pane, send command, launch agent, manager, jump, doctor, persistence, profile, program status).
-
-Notes:
-- `hq` is a thin shortcut for `agent-wrangler up`.
-- `cc` and `teams` are still available as legacy aliases.
-- `agent-wrangler start` is the default startup command: Ghostty import + startup commands + detected agents + nav + manager UI window.
-- `start` and `up --mode import` can preserve duplicate project sessions (`--preserve-duplicates`) so multiple Ghostty tabs in one repo stay as separate panes.
-- `fleet manager` creates a dedicated HQ tmux session that monitors all managed sessions in real time.
-- `fleet set` lets you pin exactly which tmux sessions count as your operating universe.
-- `drift --fleet` gives a fast per-project branch/dirty summary across active sessions.
-- `doctor --fleet --only-attention` finds red/waiting panes and prints concrete remediation actions.
-- `fleet jump` opens a fast choose-tree jump flow (inside tmux) or direct session focus.
-- `fleet jump --fzf` gives a searchable selector with attention columns (works outside tmux too).
-- `persistence save/restore` gives local snapshot/recovery of your tmux team layout.
-- `profile use <name>` applies a workspace mode and can pin managed fleet sessions + preferred max panes.
-- `hooks enable` adds tmux event hooks so health repaint reacts to pane/session changes immediately.
-- `start` now reads max panes from the active profile automatically (override with `AW_MAX_PANES`).
-- `fleet popup` opens a live fleet manager view in a tmux popup for quick triage.
-- `program` gives a deep execution system with explicit team roles, loops, and readiness gates toward an impeccable product target.
-- `program daemon` runs unattended loops with automatic fleet repaint + optional guardrail enforcement.
-- `program phases/promote/complete` enforces phase-by-phase delivery using objective gates and readiness streaks.
-- You do not need to reset Ghostty first. Import into tmux, verify control, then close old tabs gradually.
-- `import` maps live Ghostty sessions to repos by process cwd/path and can carry detected agent type (`claude`/`codex`) when enabled.
-- `import` is safe by default: startup commands and agent relaunch are disabled unless you pass `--startup` and/or `--agent`.
-- `teams up` gives one command behavior: reuse existing grid if present, or build from import/bootstrap and attach.
-- `teams paint/watch/manager` sets pane borders to green/yellow/red based on attention signals (waiting/error markers/activity).
-- `teams watch` includes a top-attention triage rail with direct fix hints (missing command, port conflicts, waiting prompts).
-- In tmux, standard pane navigation is `Ctrl-b` + arrows. `teams nav` enables no-prefix navigation:
-  - pane: `Option+Arrow`
-  - window cycle: `Option+[` and `Option+]`
-  - window jump: `Option+1..9`
-- `bootstrap` can auto-run each repo's `startup_command`. Use `--no-startup` to disable.
-- Add `--agent codex` or `--agent claude` during `bootstrap` to launch the same agent command in every pane.
-
-## Lightweight terminal UI (Ghostty monitor)
-
-The monitor is intentionally terminal-first (no heavy web app):
+### Workflow
 
 ```bash
-# One-shot status (active vs waiting vs idle)
-./scripts/termwatch summary --source ghostty --no-idle
-
-# Live updating terminal view
-./scripts/termwatch watch --source ghostty --no-idle --interval 10
-
-# Overnight guardrails (dry-run by default)
-./scripts/termwatch overnight --source ghostty --interval 300 --max-ai-sessions 4 --kill-waiting-ai-after 120
-
-# Apply guardrails (sends SIGTERM to selected sessions)
-./scripts/termwatch overnight --source ghostty --apply --interval 300 --max-ai-sessions 4 --kill-waiting-ai-after 120
+./scripts/agent-wrangler drift               # Repo cleanliness report
+./scripts/agent-wrangler doctor              # Health checks
+./scripts/agent-wrangler persistence save    # Save session layout
+./scripts/agent-wrangler persistence restore # Restore session layout
+./scripts/agent-wrangler profile list        # List workspace profiles
 ```
 
-Convenience wrapper:
+## Navigation keybindings
 
-```bash
-./scripts/overnight-guard.sh
+| Key | Action |
+|---|---|
+| `Option+Arrow` | Move between panes |
+| `Option+[` / `Option+]` | Previous/next window |
+| `Option+m` | Jump to manager window |
+| `Option+g` | Jump to grid window |
+| `Option+z` | Zoom/unzoom current pane |
+| `Option+j` | Jump to pane by number |
+| `Option+1..9` | Jump to window by number |
+
+## Configuration
+
+### `config/projects.json`
+
+Register your projects. Each entry needs an `id`, `path`, and optionally a `startup_command` and `group`:
+
+```json
+{
+  "groups": {
+    "work": { "max_active": 3 },
+    "personal": { "max_active": 2 }
+  },
+  "projects": [
+    {
+      "id": "my-webapp",
+      "name": "My Web App",
+      "group": "work",
+      "path": "~/projects/my-webapp",
+      "default_branch": "main",
+      "startup_command": "npm run dev"
+    }
+  ]
+}
 ```
 
-## Linear setup for dual-workspace visibility
+### `config/team_grid.json`
 
-This workflow expects these env vars if you want cross-workspace task signals:
+Tmux session layout, fleet membership, profiles, and persistence settings.
 
-- `LINEAR_API_KEY_GABOOJA`
-- `LINEAR_API_KEY_AMIRHJALALI`
+### Environment variables
 
-The script will call the Linear GraphQL API and pull assigned, non-completed issues per workspace.
+| Variable | Description |
+|---|---|
+| `AW_MAX_PANES` | Override maximum panes in grid (default from profile) |
 
-## Current project registry
+## Architecture
 
-Edit `/Users/amirjalali/agent-wrangler/config/projects.json` to keep this accurate.
+```
+Layer 4  program_orchestrator.py   Phase-gated delivery (team roles, readiness gates)
+Layer 3  command_center.py         Planning board + runtime monitor
+Layer 2  tmux_teams.py             Grid control, health coloring, manager, rail
+         grid_navigator.py         Curses pane browser
+         session_stats.py          Context stats collection
+Layer 1  terminal_sentinel.py      Process/TTY monitoring, AI tool classification
+Layer 0  Ghostty / tmux            Terminal substrate
+```
 
-Best practice:
+**tmux_teams.py** is the core engine — sessions, panes, health detection, fleet, persistence, Ghostty import.
 
-1. Keep full repo inventory in `projects.json` and use focus scoring to choose the active subset.
-2. Set one default startup command per repo.
-3. Keep business/personal grouping strict.
-4. Run `discover` weekly and add untracked repos.
+**terminal_sentinel.py** parses `ps` output to classify terminals and detect AI tools.
 
-## What to improve next
+**grid_navigator.py** is a curses pane browser with health coloring and agent launch shortcuts.
 
-1. Route both Linear workspaces into one operator queue issue label set (`domain:business`, `domain:personal`, `focus:today`).
-2. Patch hardcoded `/Users/gabooja/...` defaults in `gabooja-agents/linear-agent` so your local paths are first-class.
-3. Add a scheduler (launchd or Codex automation) to run `snapshot --include-linear` every hour and alert on context drift.
-4. Optionally install a terminal multiplexer (tmux or zellij) to move from many windows to a few stable sessions.
+**session_stats.py** collects scrollback size, uptime, and periodic `/usage` polls from idle Claude sessions.
 
-## Files in this folder
+## Grid navigator keys
 
-- `config/projects.json`: project inventory, grouping, startup commands.
-- `config/command_center.json`: Gastown planning cards + Ant Farm defaults.
-- `scripts/workflow_agent.py`: snapshot, focus ranking, doctor checks, discovery, Ghostty launcher.
-- `scripts/workflow`: short wrapper around `workflow_agent.py`.
-- `scripts/command_center.py`: unified `Gastown` planning + `Ant Farm` runtime command center.
-- `scripts/agent-wrangler`: primary CLI for the command center + tmux teams.
-- `scripts/wrangler`: short alias for `agent-wrangler`.
-- `scripts/cc`: legacy wrapper for `command_center.py`.
-- `scripts/tmux_teams.py`: tmux team-grid orchestrator used by `agent-wrangler`/`cc teams`.
-- `scripts/program_orchestrator.py`: impeccable-product program engine (team, loops, gates, reports).
-- `scripts/program-daemon.sh`: unattended daemon wrapper for continual program loops.
-- `scripts/teams`: direct wrapper for `tmux_teams.py`.
-- `scripts/terminal_sentinel.py`: session classification for Ghostty terminals (`active`/`waiting`/`idle`).
-- `scripts/termwatch`: wrapper for `terminal_sentinel.py`.
-- `scripts/overnight-guard.sh`: default unattended guardrail mode.
-- `scripts/daily-start.sh`: one-command morning routine.
-- `reports/`: generated snapshot JSON + Markdown reports.
-- `research/sources.md`: links used during research.
+| Key | Action |
+|---|---|
+| `j`/`k` or arrows | Navigate panes |
+| `Enter` | Jump to pane |
+| `c` | Launch Claude in pane |
+| `x` | Launch Codex in pane |
+| `s` | Send command to pane |
+| `K` | Send Ctrl-C to pane |
+| `q` | Quit |
+
+## License
+
+MIT

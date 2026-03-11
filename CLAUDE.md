@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Agent Wrangler is a machine-level control layer for managing many repos, terminals, and task queues without losing context. It orchestrates tmux sessions, monitors Ghostty terminals, and enforces phase-gated delivery toward an "impeccable product" readiness score. The metaphor: engineers as "agent wranglers" steering autonomous AI agents, not writing code directly.
+Agent Wrangler is a tmux-based command center for managing teams of AI coding agents (Claude Code, Codex, Aider, Gemini) across multiple repos. It orchestrates tmux sessions, monitors terminals, and provides health-aware grid views with idle detection.
 
 ## Running Commands
 
-All commands run from the repo root (`/Users/amirjalali/agent-wrangler`).
+All commands run from the repo root.
 
 **Primary CLI** (bash router that dispatches to Python modules):
 ```bash
@@ -16,8 +16,7 @@ All commands run from the repo root (`/Users/amirjalali/agent-wrangler`).
 ```
 
 **Key commands:**
-- `./scripts/agent-wrangler start` - Full startup: welcome banner + Ghostty import + manager (Claude Code + status rail) + grid navigator + nav bindings
-- `./scripts/agent-wrangler grid` - Standalone grid navigator (curses pane browser)
+- `./scripts/agent-wrangler start` - Full startup: welcome banner + Ghostty import + manager (Claude Code + status rail) + grid (project panes) + nav bindings
 - `./scripts/agent-wrangler ops` - Interactive operator console (numbered menu)
 - `./scripts/agent-wrangler rail` - Compact auto-refreshing status rail (for narrow splits)
 - `./scripts/agent-wrangler status` - Pane health overview
@@ -39,9 +38,8 @@ All commands run from the repo root (`/Users/amirjalali/agent-wrangler`).
 
 After `agent-wrangler start`, the tmux session has three window types:
 
-- **Manager window** (`Option+m`): Claude Code session (left ~75%) + auto-refreshing status rail (right ~25%). This is the primary interface for communicating with the user and orchestrating agents.
-- **Grid navigator window** (`Option+g`): Curses-based pane browser with health coloring, j/k navigation, Enter to jump into a pane, c/x to launch claude/codex. Shows session stats header (agent count, output volume, context usage from periodic `/usage` polls).
-- **Teams window** (`Option+t`): The actual project panes in a tiled layout. Each pane is a project repo with optional AI agent running.
+- **Manager window** (`Option+m`): Claude Code session (left ~75%) + auto-refreshing status rail (right ~25%). Primary interface for orchestrating agents. Claude Code's built-in status bar shows model, context usage, and session info at the bottom of each pane.
+- **Grid window** (`Option+g`): Tiled project panes. Each pane is a project repo with optional AI agent running. Active pane highlighted with bright white border + `▶` marker + dimmed inactive panes. Health shown via symbols: `●` green, `⚑` yellow, `✖` red. Zoom with `Option+z`, jump by number with `Option+j`.
 
 ### Layer Model
 
@@ -78,7 +76,7 @@ Layer 0  Ghostty / tmux            Terminal substrate
 
 **`terminal_sentinel.py`** - Parses `ps` output to classify terminal sessions as active/waiting/idle. Detects AI tools (claude, codex, aider, gemini) from process commands. Powers overnight guardrails.
 
-**`workflow_agent.py`** - Snapshot generation, focus ranking, health checks (doctor), repo discovery, and optional Linear GraphQL integration.
+**`workflow_agent.py`** - Snapshot generation, focus ranking, health checks (doctor), and repo discovery.
 
 ### Configuration Files (all in `config/`)
 
@@ -99,7 +97,7 @@ Layer 0  Ghostty / tmux            Terminal substrate
 - `@dataclass` for structured data (`TmuxPane`, `Proc`)
 - Subprocess calls wrapped with timeout handling (10-30 sec defaults)
 - Dry-run modes (`--dry-run`) on destructive commands
-- Environment variables: `AW_MAX_PANES` (override max panes), `LINEAR_API_KEY_GABOOJA`, `LINEAR_API_KEY_AMIRHJALALI`
+- Environment variables: `AW_MAX_PANES` (override max panes)
 - Health signals use consistent color coding: green (ok), yellow (attention), red (failure)
 - AI tool detection markers: `claude`, `codex`, `aider`, `chatgpt`, `gemini`
-- Navigation bindings: `Option+Arrow` (panes), `Option+[/]` (windows), `Option+m/g/t` (manager/grid/teams)
+- Navigation bindings: `Option+Arrow` (panes), `Option+[/]` (windows), `Option+m/g` (manager/grid), `Option+z` (zoom), `Option+j` (jump by number)

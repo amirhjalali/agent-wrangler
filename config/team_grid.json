@@ -1,23 +1,31 @@
 {
-  "default_session": "amir-grid",
+  "default_session": "agent-grid",
   "default_layout": "tiled",
   "default_projects": [
-    "gabooja-knowledge-base",
-    "creator-studio",
-    "amirhjalali-com",
-    "content-studio",
-    "gabooja-agents",
-    "gabooja-research",
-    "agentcy",
-    "campalborz",
-    "argumend"
+    "my-webapp",
+    "api-server",
+    "side-project"
   ],
   "fleet": {
     "managed_sessions": [
-      "amir-grid"
+      "agent-grid"
     ],
     "manager_session": "wrangler-hq",
     "manager_window": "fleet"
   },
-  "updated_at": "2026-02-27T04:53:31+00:00"
+  "persistence": {
+    "enabled": false,
+    "autosave_minutes": 15
+  },
+  "profiles": {
+    "current": "default",
+    "items": {
+      "default": {
+        "managed_sessions": [
+          "agent-grid"
+        ],
+        "max_panes": 10
+      }
+    }
+  }
 }

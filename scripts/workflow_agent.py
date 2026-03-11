@@ -12,7 +12,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib import error, request
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "projects.json"
@@ -36,7 +35,7 @@ SCAN_SKIP_DIRS = {
     "Public",
     ".Trash",
 }
-BUSINESS_HINTS = ("gabooja", "agentcy", "creator-studio", "content-studio")
+BUSINESS_HINTS = ()
 
 
 def run_cmd(cmd: list[str], timeout: int = 10) -> tuple[int, str, str]:
@@ -262,148 +261,7 @@ def score_project(project: dict[str, Any]) -> tuple[int, list[str]]:
     return score, reasons
 
 
-def query_linear_workspace(workspace_name: str, token: str) -> dict[str, Any]:
-    graph_query = """
-    query WorkflowAgentAssignedIssues {
-      viewer {
-        name
-        assignedIssues(first: 30) {
-          nodes {
-            identifier
-            title
-            priority
-            updatedAt
-            url
-            state {
-              name
-              type
-            }
-            team {
-              key
-              name
-            }
-            project {
-              name
-            }
-          }
-        }
-      }
-    }
-    """
-
-    payload = json.dumps({"query": graph_query}).encode("utf-8")
-
-    headers_to_try = [
-        {"Content-Type": "application/json", "Authorization": token},
-        {"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-    ]
-
-    body = None
-    for headers in headers_to_try:
-        req = request.Request(
-            "https://api.linear.app/graphql",
-            data=payload,
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with request.urlopen(req, timeout=8) as resp:
-                body = resp.read().decode("utf-8")
-                break
-        except error.HTTPError:
-            continue
-        except Exception as exc:
-            return {
-                "workspace": workspace_name,
-                "ok": False,
-                "error": str(exc),
-                "issues": [],
-            }
-
-    if body is None:
-        return {
-            "workspace": workspace_name,
-            "ok": False,
-            "error": "Authentication failed",
-            "issues": [],
-        }
-
-    try:
-        decoded = json.loads(body)
-    except json.JSONDecodeError:
-        return {
-            "workspace": workspace_name,
-            "ok": False,
-            "error": "Invalid JSON response",
-            "issues": [],
-        }
-
-    if "errors" in decoded:
-        return {
-            "workspace": workspace_name,
-            "ok": False,
-            "error": decoded["errors"][0].get("message", "Unknown error"),
-            "issues": [],
-        }
-
-    viewer = decoded.get("data", {}).get("viewer", {})
-    nodes = viewer.get("assignedIssues", {}).get("nodes", [])
-
-    open_issues: list[dict[str, Any]] = []
-    for node in nodes:
-        state_type = (node.get("state") or {}).get("type", "").lower()
-        if state_type in {"completed", "canceled"}:
-            continue
-        open_issues.append(
-            {
-                "identifier": node.get("identifier"),
-                "title": node.get("title"),
-                "priority": node.get("priority"),
-                "updated_at": node.get("updatedAt"),
-                "url": node.get("url"),
-                "state": (node.get("state") or {}).get("name"),
-                "team": (node.get("team") or {}).get("key") or (node.get("team") or {}).get("name"),
-                "project": (node.get("project") or {}).get("name"),
-            }
-        )
-
-    # Priority first (higher number first), then most recent update
-    open_issues.sort(
-        key=lambda issue: (
-            issue.get("priority") if isinstance(issue.get("priority"), int) else -1,
-            issue.get("updated_at") or "",
-        ),
-        reverse=True,
-    )
-
-    return {
-        "workspace": workspace_name,
-        "ok": True,
-        "viewer": viewer.get("name"),
-        "issues": open_issues,
-    }
-
-
-def fetch_conductor_status() -> dict[str, Any] | None:
-    urls = [
-        "http://localhost:3847/api/conductor/status",
-        "http://localhost:3847/status",
-    ]
-    for url in urls:
-        try:
-            with request.urlopen(url, timeout=1.5) as resp:
-                raw = resp.read().decode("utf-8")
-                if not raw.strip():
-                    continue
-                data = json.loads(raw)
-                data["_source"] = url
-                return data
-        except Exception:
-            continue
-    return None
-
-
-def build_snapshot(config: dict[str, Any], include_linear: bool) -> dict[str, Any]:
+def build_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     processes, process_error = gather_processes()
     listening, listening_error = gather_listening_ports()
     warnings: list[str] = []
@@ -439,27 +297,6 @@ def build_snapshot(config: dict[str, Any], include_linear: bool) -> dict[str, An
 
     projects_out.sort(key=lambda p: p["focus_score"], reverse=True)
 
-    linear_data: list[dict[str, Any]] = []
-    if include_linear:
-        for ws in config.get("linear_workspaces", []):
-            env_name = ws.get("api_key_env")
-            if not env_name:
-                continue
-            token = os.environ.get(env_name)
-            if not token:
-                linear_data.append(
-                    {
-                        "workspace": ws.get("name", env_name),
-                        "ok": False,
-                        "error": f"Missing env var: {env_name}",
-                        "issues": [],
-                    }
-                )
-                continue
-            linear_data.append(query_linear_workspace(ws.get("name", env_name), token))
-
-    conductor = fetch_conductor_status()
-
     dirty_projects = sum(1 for p in projects_out if p["git"]["dirty_count"] > 0)
     running_projects = sum(1 for p in projects_out if p["running_processes"])
 
@@ -473,8 +310,6 @@ def build_snapshot(config: dict[str, Any], include_linear: bool) -> dict[str, An
             "running_projects": running_projects,
         },
         "projects": projects_out,
-        "linear": linear_data,
-        "conductor": conductor,
     }
 
 
@@ -550,30 +385,6 @@ def snapshot_to_markdown(snapshot: dict[str, Any], top_n: int = 6) -> str:
     if not running_any:
         lines.append("No tracked project processes detected.")
         lines.append("")
-
-    lines.append("## Linear Signals")
-    lines.append("")
-    linear_rows = snapshot.get("linear", [])
-    if not linear_rows:
-        lines.append("Linear fetch not requested in this snapshot.")
-        lines.append("")
-    else:
-        for ws in linear_rows:
-            lines.append(f"### Workspace: {ws.get('workspace')}")
-            if not ws.get("ok"):
-                lines.append(f"- Error: `{ws.get('error')}`")
-                lines.append("")
-                continue
-
-            issues = ws.get("issues", [])
-            lines.append(f"- Open assigned issues: **{len(issues)}**")
-            for issue in issues[:8]:
-                lines.append(
-                    f"- `{issue.get('identifier')}` [{issue.get('state')}] ({issue.get('team')}) {issue.get('title')}"
-                )
-            if len(issues) > 8:
-                lines.append(f"- ... and {len(issues) - 8} more")
-            lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -840,15 +651,12 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     snap_parser = sub.add_parser("snapshot", help="Build and save a full snapshot")
-    snap_parser.add_argument("--include-linear", action="store_true", help="Fetch Linear assigned issues")
     snap_parser.add_argument("--no-write", action="store_true", help="Do not write snapshot files")
 
     focus_parser = sub.add_parser("focus", help="Print prioritized focus list")
-    focus_parser.add_argument("--include-linear", action="store_true", help="Fetch Linear assigned issues")
     focus_parser.add_argument("--limit", type=int, default=6, help="Number of projects to show")
 
-    doctor_parser = sub.add_parser("doctor", help="Run quick health checks")
-    doctor_parser.add_argument("--include-linear", action="store_true", help="Fetch Linear assigned issues")
+    sub.add_parser("doctor", help="Run quick health checks")
 
     launch_parser = sub.add_parser("launch", help="Open a Ghostty window for one project")
     launch_parser.add_argument("project_id", help="Project id from config/projects.json")
@@ -893,8 +701,7 @@ def main() -> int:
             write_report=args.write_report,
         )
 
-    include_linear = bool(getattr(args, "include_linear", False))
-    snapshot = build_snapshot(config, include_linear=include_linear)
+    snapshot = build_snapshot(config)
 
     if args.command == "snapshot":
         if not args.no_write:

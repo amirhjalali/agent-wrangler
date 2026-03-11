@@ -26,27 +26,6 @@
 - AeroSpace guide (automatic window rules)
   - https://raw.githubusercontent.com/nikitabobko/AeroSpace/main/docs/guide.adoc
 
-## Linear workflow and agent intake
-
-- Linear API intro (GraphQL endpoint)
-  - https://linear.app/docs/api
-- Linear My Issues (personal execution lane)
-  - https://linear.app/docs/my-issues
-- Linear Projects (cross-team planning)
-  - https://linear.app/docs/projects
-- Linear delegation to agents
-  - https://linear.app/docs/delegating-to-agents
-
-## Local machine and codebase evidence
-
-- Existing orchestrator code:
-  - `/Users/amirjalali/gabooja-agents/linear-agent/README.md`
-  - `/Users/amirjalali/gabooja-agents/linear-agent/docs/conductor.md`
-  - `/Users/amirjalali/gabooja-agents/linear-agent/MULTI-INSTANCE-SETUP.md`
-- Existing platform framework:
-  - `/Users/amirjalali/agentcy/README.md`
-  - `/Users/amirjalali/agentcy/ROADMAP.md`
-
 ## AOE + tmux deep-dive (2026-02-27)
 
 - Agent of Empires landing and docs:
