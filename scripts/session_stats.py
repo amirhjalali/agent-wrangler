@@ -128,26 +128,24 @@ def format_stats_summary(rows: list[dict[str, Any]], stats_data: dict[str, Any])
         sessions_data.get(str(r.get("project_id") or ""), {}).get("scrollback_kb", 0)
         for r in rows
     )
-    claude_count = sum(
-        1 for r in rows
-        if str(r.get("ai_tool") or r.get("agent") or "") == "claude"
-    )
+
+    # Count Claude sessions and aggregate stats from cc_stats
+    claude_count = 0
+    total_cost = 0.0
+    total_tokens_k = 0
+    for r in rows:
+        cc = r.get("cc_stats")
+        if cc:
+            claude_count += 1
+            total_cost += cc.get("cost", 0.0)
+            total_tokens_k += cc.get("tokens_k", 0)
+        elif str(r.get("ai_tool") or r.get("agent") or "") == "claude":
+            claude_count += 1
 
     parts = [f"Agents: {claude_count}", f"Output: {total_kb:.0f}kb"]
-
-    # Find most recent /usage data
-    latest_ctx = ""
-    latest_time = 0.0
-    for sid, entry in sessions_data.items():
-        usage = entry.get("usage", {})
-        polled = usage.get("polled_at", 0.0)
-        if polled > latest_time:
-            ctx = usage.get("context_line", "")
-            if ctx:
-                latest_ctx = f"{sid}: {ctx}"
-                latest_time = polled
-
-    if latest_ctx:
-        parts.append(latest_ctx)
+    if total_tokens_k > 0:
+        parts.append(f"{total_tokens_k}k tok")
+    if total_cost > 0:
+        parts.append(f"${total_cost:.2f}")
 
     return "  |  ".join(parts)

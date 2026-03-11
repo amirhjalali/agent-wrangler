@@ -31,7 +31,7 @@ Run Claude Code, Codex, Aider, or Gemini sessions side-by-side in a health-monit
 ## Requirements
 
 - macOS (tested on Ghostty, works with any terminal)
-- Python 3.10+
+- Python 3.7+
 - tmux
 
 ```bash
@@ -39,7 +39,7 @@ brew install tmux
 brew install fzf   # optional, enables fuzzy-find in fleet jump
 ```
 
-No other dependencies. Pure Python stdlib + Bash.
+No pip install, no virtual environment, no build step. Pure Python stdlib + Bash.
 
 ## Quick start
 

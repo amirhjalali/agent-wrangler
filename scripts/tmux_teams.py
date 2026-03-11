@@ -454,6 +454,64 @@ def capture_pane_text(pane_id: str, lines: int) -> str:
     return out.lower()
 
 
+def capture_pane_raw(pane_id: str, lines: int) -> str:
+    """Capture pane text without lowercasing (needed for status bar parsing)."""
+    code, out, _ = tmux(["capture-pane", "-p", "-t", pane_id, "-S", f"-{max(5, lines)}"], timeout=8)
+    if code != 0:
+        return ""
+    return out
+
+
+# ── Claude Code status bar parser ──────────────────────────────────
+# Parses the native status line rendered at the bottom of Claude Code sessions:
+#   Opus 4.6 | ●●●●○○○○○○ 86k/200k (42%) | ~$2.93
+#   5hr ○○○○○○○○○○ 2% in 3h 33m | 7d ●●●○○○○○○○ 39% in 1d 15h | extra $0.00/$50
+
+_CC_MODEL_RE = re.compile(
+    r"((?:Opus|Sonnet|Haiku)\s+[\d.]+)"
+    r"\s*\|.*?(\d+)k/(\d+)k\s*\((\d+)%\)"
+    r"\s*\|.*?~?\$?([\d.]+)"
+)
+_CC_RATE_RE = re.compile(r"(\d+(?:hr|d))\s+[●○]+\s+(\d+)%")
+
+
+def parse_claude_status(pane_id: str) -> dict[str, Any] | None:
+    """Scrape Claude Code's status bar from the bottom of a pane.
+
+    Returns dict with model, tokens_used, tokens_max, context_pct, cost,
+    and rate limits, or None if no status bar found.
+    """
+    raw = capture_pane_raw(pane_id, lines=8)
+    if not raw:
+        return None
+
+    # Work backwards from bottom to find the status lines
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+
+    # Search the last 8 non-empty lines for the model line
+    tail = lines[-8:]
+    result: dict[str, Any] = {}
+
+    for line in tail:
+        m = _CC_MODEL_RE.search(line)
+        if m:
+            result["model"] = m.group(1)
+            result["tokens_k"] = int(m.group(2))
+            result["tokens_max_k"] = int(m.group(3))
+            result["context_pct"] = int(m.group(4))
+            result["cost"] = float(m.group(5))
+
+        # Rate limit lines (5hr / 7d)
+        for rm in _CC_RATE_RE.finditer(line):
+            window = rm.group(1)
+            pct = int(rm.group(2))
+            result[f"rate_{window}"] = pct
+
+    return result if result else None
+
+
 def detect_error_marker(text: str) -> str | None:
     if not text:
         return None
@@ -509,31 +567,50 @@ def pane_health_level(
 
 
 def style_for_level(level: str) -> tuple[str, str]:
+    """Return (inactive_border_style, active_border_style) for a health level.
+
+    Health is encoded via border color (hue). Active pane gets a bright white
+    border so it's unmistakably distinct regardless of health color.
+    """
     if level == "red":
-        return "fg=colour160", "fg=colour196,bold"
+        return "fg=colour88", "fg=colour255,bold"
     if level == "yellow":
-        return "fg=colour220", "fg=colour214,bold"
-    return "fg=colour34", "fg=colour82,bold"
+        return "fg=colour136", "fg=colour255,bold"
+    return "fg=colour22", "fg=colour255,bold"
 
 
 def set_window_orchestrator_format(session: str) -> None:
-    tmux(["set-option", "-w", "-t", f"{session}:0", "pane-border-status", "top"], timeout=5)
-    tmux(["set-option", "-w", "-t", f"{session}:0", "pane-border-lines", "single"], timeout=5)
+    """Apply pane border format, indicators, and inactive dimming.
+
+    All calls are idempotent set-option — safe to call on every refresh.
+    """
+    target = f"{session}:0"
+    tmux(["set-option", "-w", "-t", target, "pane-border-status", "top"], timeout=5)
+    tmux(["set-option", "-w", "-t", target, "pane-border-lines", "single"], timeout=5)
+    tmux(["set-option", "-w", "-t", target, "pane-border-indicators", "both"], timeout=5)
+    tmux(["set-option", "-w", "-t", target, "window-style", "fg=colour245,bg=colour234"], timeout=5)
+    tmux(["set-option", "-w", "-t", target, "window-active-style", "fg=default,bg=default"], timeout=5)
+    # Border format: active marker (▶) + health symbol (● ⚑ ✖) + project info
     fmt = (
-        "#{?pane_active,#[bold],}"
-        "#{?@needs_attention,#[fg=colour196],#[fg=colour34]}"
-        "#{pane_index} #{@project_id} #{@agent} #{@health}"
-        "#{?@health_reason, (#{@health_reason}),}"
+        "#{?pane_active,#[fg=colour255 bold]▶ ,  }"
+        "#{?#{==:#{@health},RED},#[fg=colour196]✖ ,"
+        "#{?#{==:#{@health},YELLOW},#[fg=colour220]⚑ ,"
+        "#[fg=colour34]● }}"
+        "#[fg=colour250]#{@project_id}"
+        "#{?@health_reason, #[fg=colour246](#{@health_reason}),}"
         "#[default]"
     )
-    tmux(["set-option", "-w", "-t", f"{session}:0", "pane-border-format", fmt], timeout=5)
+    tmux(["set-option", "-w", "-t", target, "pane-border-format", fmt], timeout=5)
+    # Status bar: zoom indicator + session name
+    tmux(["set-option", "-t", session, "status-right",
+          "#{?window_zoomed_flag,#[fg=colour214 bold] ZOOM #[default],} "
+          "#[fg=colour130]#{session_name}#[default] %H:%M"], timeout=5)
 
 
 def refresh_pane_health(
     session: str,
     capture_lines: int,
     wait_attention_min: int,
-    apply_colors: bool,
 ) -> list[dict[str, Any]]:
     panes = list_panes(session)
     by_tty = session_monitor_by_tty()
@@ -561,15 +638,20 @@ def refresh_pane_health(
         elif port_in_use and not reason.startswith("error:"):
             reason = f"port in use: {port_in_use}"
 
+        # Parse Claude Code status bar for agent panes
+        cc_stats = None
+        if agent == "claude":
+            cc_stats = parse_claude_status(pane.pane_id)
+
         tmux(["set-option", "-p", "-t", pane.pane_id, "@agent", agent], timeout=5)
         tmux(["set-option", "-p", "-t", pane.pane_id, "@health", level.upper()], timeout=5)
         tmux(["set-option", "-p", "-t", pane.pane_id, "@health_reason", reason], timeout=5)
         tmux(["set-option", "-p", "-t", pane.pane_id, "@needs_attention", "1" if needs_attention else "0"], timeout=5)
 
-        if apply_colors:
-            border_style, active_style = style_for_level(level)
-            tmux(["set-option", "-p", "-t", pane.pane_id, "pane-border-style", border_style], timeout=5)
-            tmux(["set-option", "-p", "-t", pane.pane_id, "pane-active-border-style", active_style], timeout=5)
+        # Always apply border colors — health on hue, active pane bright white
+        border_style, active_style = style_for_level(level)
+        tmux(["set-option", "-p", "-t", pane.pane_id, "pane-border-style", border_style], timeout=5)
+        tmux(["set-option", "-p", "-t", pane.pane_id, "pane-active-border-style", active_style], timeout=5)
 
         rows.append(
             {
@@ -587,6 +669,7 @@ def refresh_pane_health(
                 "error_marker": error_marker,
                 "missing_command": missing_command,
                 "port_in_use": port_in_use,
+                "cc_stats": cc_stats,
             }
         )
     return rows
@@ -753,13 +836,11 @@ def session_health_summary(
     session: str,
     capture_lines: int,
     wait_attention_min: int,
-    apply_colors: bool,
 ) -> dict[str, Any]:
     rows = refresh_pane_health(
         session=session,
         capture_lines=capture_lines,
         wait_attention_min=wait_attention_min,
-        apply_colors=apply_colors,
     )
     counts = {
         "red": 0,
@@ -916,7 +997,7 @@ def create_grid_session(
         raise ValueError(f"Project '{project_ids[0]}' has no path")
 
     code, _, err = tmux(
-        ["new-session", "-d", "-s", session, "-n", "teams", "-x", "260", "-y", "90", "-c", first_path],
+        ["new-session", "-d", "-s", session, "-n", "grid", "-x", "260", "-y", "90", "-c", first_path],
         timeout=8,
     )
     if code != 0:
@@ -1244,21 +1325,8 @@ def run_up(args: argparse.Namespace) -> int:
             )
         )
 
-        # Create grid navigator window
-        grid_script = ROOT / "scripts" / "grid_navigator.py"
-        grid_cmd = (
-            f"python3 {shlex.quote(str(grid_script))} "
-            f"--session {shlex.quote(session)} --interval 5 "
-            f"--manager-window {shlex.quote(args.manager_window)}"
-        )
-        grid_shell_tail = "; exec zsh"
-        grid_shell = "zsh -lc " + shlex.quote(grid_cmd + grid_shell_tail)
-        grid_window = "grid"
-        if not manager_window_exists(session, grid_window):
-            tmux(
-                ["new-window", "-d", "-t", session, "-n", grid_window, "-c", str(ROOT), grid_shell],
-                timeout=8,
-            )
+    # Apply pane orchestrator format, status bar, and pane dimming
+    set_window_orchestrator_format(session)
 
     show_status = bool(getattr(args, "status", True))
     attach = bool(getattr(args, "attach", True))
@@ -1312,7 +1380,7 @@ def run_rail(args: argparse.Namespace) -> int:
             session=session,
             capture_lines=40,
             wait_attention_min=1,
-            apply_colors=False,
+    
         )
 
         lines: list[str] = []
@@ -1322,6 +1390,9 @@ def run_rail(args: argparse.Namespace) -> int:
 
         counts = {"green": 0, "yellow": 0, "red": 0, "total": 0}
         waiting = 0
+        total_cost = 0.0
+        total_tokens_k = 0
+        claude_count = 0
         for row in rows:
             counts["total"] += 1
             health = str(row.get("health") or "green")
@@ -1341,6 +1412,21 @@ def run_rail(args: argparse.Namespace) -> int:
             line = f" {dot_color}●\033[0m {project:<16}{agent_label}"
             if status_label:
                 line += f"  \033[2m{status_label}\033[0m"
+
+            # Append Claude Code stats when available
+            cc = row.get("cc_stats")
+            if cc:
+                claude_count += 1
+                ctx = cc.get("context_pct")
+                cost = cc.get("cost")
+                if ctx is not None:
+                    ctx_color = "\033[31m" if ctx >= 80 else "\033[33m" if ctx >= 50 else "\033[32m"
+                    line += f"  {ctx_color}{ctx}%\033[0m"
+                if cost is not None:
+                    line += f"  \033[2m${cost:.2f}\033[0m"
+                    total_cost += cost
+                total_tokens_k += cc.get("tokens_k", 0)
+
             lines.append(line)
 
         lines.append("\033[2m" + "─" * 30 + "\033[0m")
@@ -1350,6 +1436,11 @@ def run_rail(args: argparse.Namespace) -> int:
             f"\033[33m{counts['yellow']}y\033[0m "
             f"\033[31m{counts['red']}r\033[0m"
         )
+        if claude_count > 0:
+            lines.append(
+                f" \033[36m{claude_count} claude\033[0m  "
+                f"\033[2m{total_tokens_k}k tok  ${total_cost:.2f}\033[0m"
+            )
 
         print("\n".join(lines), flush=True)
 
@@ -1371,16 +1462,20 @@ def run_paint(args: argparse.Namespace) -> int:
         session=session,
         capture_lines=args.capture_lines,
         wait_attention_min=args.wait_attention_min,
-        apply_colors=(not args.no_colorize),
+
     )
     attention = len([row for row in rows if row.get("needs_attention")])
     print(f"Painted session '{session}' panes={len(rows)} needs_attention={attention}")
     for row in rows:
         wait = f"{row['wait']}m" if row.get("wait") is not None else "-"
         mark = "!" if row.get("needs_attention") else " "
+        cc = row.get("cc_stats") or {}
+        ctx_str = f"ctx={cc['context_pct']}%" if cc.get("context_pct") is not None else ""
+        cost_str = f"${cc['cost']:.2f}" if cc.get("cost") is not None else ""
+        cc_label = f" {ctx_str} {cost_str}".rstrip() if (ctx_str or cost_str) else ""
         print(
             f"{mark} {row['index']:<2} {row['project_id']:<22} {row['health']:<6} {row['status']:<10} "
-            f"wait={wait:<4} agent={row['agent']:<8} reason={row['reason']}"
+            f"wait={wait:<4} agent={row['agent']:<8} reason={row['reason']}{cc_label}"
         )
     return 0
 
@@ -1400,18 +1495,21 @@ def run_watch(args: argparse.Namespace) -> int:
                 session=session,
                 capture_lines=args.capture_lines,
                 wait_attention_min=args.wait_attention_min,
-                apply_colors=(not args.no_colorize),
+        
             )
             if not args.no_clear:
                 print("\033[2J\033[H", end="")
             attention = len([row for row in rows if row.get("needs_attention")])
             print(f"[{now_iso()}] Agent Wrangler Manager  session={session} panes={len(rows)} attention={attention}")
-            print(f"{'IDX':<4} {'PROJECT':<22} {'HLTH':<6} {'STATUS':<10} {'WAIT':<6} {'AGENT':<8} REASON")
+            print(f"{'IDX':<4} {'PROJECT':<22} {'HLTH':<6} {'STATUS':<10} {'WAIT':<6} {'AGENT':<8} {'CTX':<6} {'COST':<8} REASON")
             for row in rows:
                 wait = f"{row['wait']}m" if row.get("wait") is not None else "-"
+                cc = row.get("cc_stats") or {}
+                ctx_str = f"{cc['context_pct']}%" if cc.get("context_pct") is not None else "-"
+                cost_str = f"${cc['cost']:.2f}" if cc.get("cost") is not None else "-"
                 print(
                     f"{row['index']:<4} {row['project_id']:<22} {row['health']:<6} {row['status']:<10} "
-                    f"{wait:<6} {row['agent']:<8} {row['reason']}"
+                    f"{wait:<6} {row['agent']:<8} {ctx_str:<6} {cost_str:<8} {row['reason']}"
                 )
 
             attention_rows = [row for row in rows if row.get("needs_attention") or str(row.get("health")) == "red"]
@@ -1496,7 +1594,7 @@ def run_manager(args: argparse.Namespace) -> int:
     if not manager_window_exists(session, window):
         # Create manager window with Claude Code
         wrangler_root = str(ROOT)
-        claude_cmd = "claude"
+        claude_cmd = "claude --dangerously-skip-permissions"
         shell_tail = "; exec zsh"
         shell_command = "zsh -lc " + shlex.quote(claude_cmd + shell_tail)
         code, _, err = tmux(
@@ -1540,7 +1638,6 @@ def fleet_health_rows(
     sessions: list[str],
     capture_lines: int,
     wait_attention_min: int,
-    apply_colors: bool,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for session in sessions:
@@ -1567,7 +1664,7 @@ def fleet_health_rows(
                     session=session,
                     capture_lines=capture_lines,
                     wait_attention_min=wait_attention_min,
-                    apply_colors=apply_colors,
+
                 )
             )
         except ValueError as exc:
@@ -1777,7 +1874,7 @@ def run_fleet_status(args: argparse.Namespace) -> int:
         sessions=sessions,
         capture_lines=args.capture_lines,
         wait_attention_min=args.wait_attention_min,
-        apply_colors=(not args.no_colorize),
+
     )
     totals = {
         "sessions": len(rows),
@@ -1829,7 +1926,7 @@ def run_fleet_watch(args: argparse.Namespace) -> int:
                 sessions=sessions,
                 capture_lines=args.capture_lines,
                 wait_attention_min=args.wait_attention_min,
-                apply_colors=(not args.no_colorize),
+        
             )
             if not args.no_clear:
                 print("\033[2J\033[H", end="")
@@ -1990,7 +2087,7 @@ def run_fleet_jump(args: argparse.Namespace) -> int:
             sessions=sessions,
             capture_lines=max(20, int(args.capture_lines)),
             wait_attention_min=max(0, int(args.wait_attention_min)),
-            apply_colors=False,
+    
         )
         line_rows: list[str] = []
         for row in rows:
@@ -2506,7 +2603,7 @@ def run_doctor(args: argparse.Namespace) -> int:
             session=session,
             capture_lines=max(20, int(args.capture_lines)),
             wait_attention_min=max(0, int(args.wait_attention_min)),
-            apply_colors=False,
+    
         )
         if args.only_attention:
             rows = [row for row in rows if row.get("needs_attention") or str(row.get("health")) == "red"]
@@ -2580,9 +2677,12 @@ def run_nav(args: argparse.Namespace) -> int:
     named_window_bindings = [
         ("M-m", ["select-window", "-t", f"{session}:manager"]),
         ("M-g", ["select-window", "-t", f"{session}:grid"]),
-        ("M-t", ["select-window", "-t", f"{session}:teams"]),
     ]
-    all_bindings = pane_bindings + window_bindings + index_bindings + named_window_bindings
+    utility_bindings = [
+        ("M-z", ["resize-pane", "-Z"]),          # zoom toggle
+        ("M-j", ["display-panes", "-d", "2000"]),  # jump by number overlay
+    ]
+    all_bindings = pane_bindings + window_bindings + index_bindings + named_window_bindings + utility_bindings
 
     if args.remove:
         for key, _cmd in all_bindings:
@@ -2596,7 +2696,8 @@ def run_nav(args: argparse.Namespace) -> int:
     print("Pane navigation: Option+Arrow")
     print("Window navigation: Option+[ / Option+]")
     print("Window direct jump: Option+1..9")
-    print("Named windows: Option+m (manager) | Option+g (grid) | Option+t (teams)")
+    print("Named windows: Option+m (manager) | Option+g (grid)")
+    print("Utilities: Option+z (zoom toggle) | Option+j (jump by number)")
     return 0
 
 

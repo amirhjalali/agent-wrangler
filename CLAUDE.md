@@ -30,7 +30,7 @@ All commands run from the repo root.
 - `workflow` -> `workflow_agent.py`
 - `termwatch` -> `terminal_sentinel.py`
 
-**No build step, no test suite.** Pure Python 3.10+ and Bash. No package manager or virtual environment needed. All dependencies are stdlib (`subprocess`, `json`, `argparse`, `curses`, `pathlib`).
+**No build step, no test suite.** Pure Python 3.7+ and Bash. No package manager or virtual environment needed. All dependencies are stdlib (`subprocess`, `json`, `argparse`, `curses`, `pathlib`).
 
 ## Architecture
 
