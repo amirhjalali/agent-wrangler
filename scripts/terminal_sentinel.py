@@ -333,10 +333,17 @@ def classify_sessions(
                     delta_cpu = None
 
             is_active = (
-                primary.pcpu >= 1.0
+                primary.pcpu >= 3.0
                 or primary.stat.startswith("R")
-                or (delta_cpu is not None and delta_cpu >= 0.8)
+                or (delta_cpu is not None and delta_cpu >= 2.0)
             )
+
+            # Hysteresis: if previously waiting, require stronger signal to flip back.
+            # This prevents flapping from minor CPU blips (cursor, status bar).
+            was_waiting = same_proc and prev.get("waiting_since") is not None
+            if was_waiting and not primary.stat.startswith("R"):
+                # Need higher CPU to break out of waiting state
+                is_active = primary.pcpu >= 5.0 or (delta_cpu is not None and delta_cpu >= 3.0)
 
             if is_active:
                 status = "active"
