@@ -87,10 +87,6 @@ case "${1:-}" in
     shift
     exec python3 "$SCRIPT_DIR/program_orchestrator.py" "$@"
     ;;
-  overview)
-    shift
-    set -- ui "$@"
-    ;;
 esac
 
 exec python3 "$SCRIPT_DIR/command_center.py" "$@"

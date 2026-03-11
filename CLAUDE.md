@@ -48,11 +48,9 @@ After `agent-wrangler start`, the tmux session has three window types:
 ### Layer Model
 
 ```
-Layer 4  program_orchestrator.py   Phase-gated delivery (team roles, loops, readiness gates)
-Layer 3  command_center.py         Gastown planning board + Ant Farm runtime (legacy curses UI deprecated)
-Layer 2  tmux_teams.py             Tmux grid control (panes, sessions, health coloring, manager, rail)
-        grid_navigator.py         Curses pane browser (standalone, imports from tmux_teams)
-        session_stats.py          Cheap + periodic context stats collection
+Layer 3  program_orchestrator.py   Phase-gated delivery (team roles, loops, readiness gates)
+Layer 2  command_center.py         Ant Farm runtime monitor + operator console
+        tmux_teams.py             Tmux grid control (panes, sessions, health coloring, manager, rail)
 Layer 1  terminal_sentinel.py      Process/TTY monitoring, AI tool classification
 Layer 0  Ghostty / tmux            Terminal substrate
 ```
@@ -61,20 +59,15 @@ Layer 0  Ghostty / tmux            Terminal substrate
 
 `agent-wrangler` (bash) routes subcommands:
 - `start` -> welcome banner + `teams up` with manager + grid + nav flags
-- `grid` -> `grid_navigator.py` directly
 - `up`, `status`, `paint`, `watch`, `nav`, `rail`, `exit`, etc. -> `command_center.py teams ...` -> delegates to `tmux_teams.py`
 - `program ...` -> `program_orchestrator.py` directly
-- `ops`, `gastown`, `antfarm` -> `command_center.py` directly
+- `ops`, `antfarm` -> `command_center.py` directly
 
 ### Key Modules
 
 **`tmux_teams.py`** - The core engine. Manages tmux sessions, panes, health detection, persistence, profiles, hooks, and Ghostty-to-tmux import. The `run_manager` function creates a Claude Code + status rail split window. The `run_rail` function provides the compact auto-refreshing sidebar. Uses `@dataclass TmuxPane` as its primary data structure.
 
-**`grid_navigator.py`** - Standalone curses pane browser. Shows pane list with health coloring (green/yellow/red), stats header with agent counts and context usage. Supports jump-to-pane, launch agent, send command, and switch-to-manager keybindings.
-
-**`session_stats.py`** - Two-tier stats collection. Cheap stats (scrollback size, uptime) gathered every refresh cycle. Periodic `/usage` polls sent to one idle Claude session every ~5 minutes. Stores in `.state/session_stats.json`.
-
-**`command_center.py`** - Two subsystems: *Gastown* (card-based planning with lanes: now/next/week/later) and *Ant Farm* (runtime session monitor). The old curses UI is deprecated in favor of the manager + grid setup.
+**`command_center.py`** - Ant Farm (runtime session monitor for Ghostty terminals) + interactive operator console (`ops`). Thin dispatcher that delegates grid operations to `tmux_teams.py`.
 
 **`program_orchestrator.py`** - Delivery roadmap with 4 phases, 6 team roles, 4 loop cadences, and 5 readiness gates. Computes a 0-100 readiness score. Phase 4 completion requires 92+ score for 7 consecutive days.
 
