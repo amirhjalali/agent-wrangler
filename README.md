@@ -12,213 +12,188 @@
    ███ ███  ██   ██ ██   ██ ██   ████  ██████  ███████ ███████ ██   ██
 ```
 
-# Agent Wrangler
+**Manage teams of AI coding agents from one terminal.**
 
-A tmux-based command center for managing teams of AI coding agents across multiple repos.
+Agent Wrangler gives you a tmux grid where each pane is a project with an AI agent (Claude Code, Codex, Aider, Gemini). Color-coded borders show you which agents are working, waiting, or broken. One command to start, keyboard shortcuts to navigate.
 
-Run Claude Code, Codex, Aider, or Gemini sessions side-by-side in a health-monitored grid. See which agents are active, idle, or need attention — at a glance.
+```
+┌──── ● my-webapp ────────┬──── ⚑ api-server ────────┐
+│                         │                           │
+│  $ claude               │  $ codex                  │
+│  > implementing auth    │  (waiting 3m)             │
+│                         │                           │
+├──── ● side-project ─────┼──── ✖ data-pipeline ──────┤
+│                         │                           │
+│  $ aider                │  (idle 45m)               │
+│  > refactoring tests    │                           │
+│                         │                           │
+└─────────────────────────┴───────────────────────────┘
+  ● green = working    ⚑ yellow = needs attention    ✖ red = problem
+```
 
-## What it does
+---
 
-- **Grid view** — Tile your AI agent sessions in a tmux grid with color-coded health borders (green/yellow/red)
-- **Manager window** — Claude Code + auto-refreshing status rail showing all panes with context % and cost
-- **Hide/show agents** — Toggle pane visibility without stopping agents. Hidden panes run in the background and appear dimmed in the navigator and rail
-- **Live stats** — Scrapes Claude Code's status bar for model, context window %, token usage, and cost per session
-- **Idle detection** — Classifies each terminal as active, waiting, idle, or background by inspecting process trees
-- **Agent detection** — Automatically identifies running AI tools (claude, codex, aider, gemini)
-- **Fleet management** — Monitor multiple tmux sessions from one place
-- **Terminal import** — Import existing Ghostty tabs into the tmux grid without losing context
-- **Navigation** — Option+Arrow panes, Option+m/g windows, Option+z zoom, Option+j jump
-
-## Requirements
-
-- macOS (tested on Ghostty, works with any terminal)
-- Python 3.7+
-- tmux
+## Install
 
 ```bash
 brew install tmux
-brew install fzf   # optional, enables fuzzy-find in fleet jump
-```
+brew install fzf          # optional, for fuzzy-find
 
-No pip install, no virtual environment, no build step. Pure Python stdlib + Bash.
-
-## Quick start
-
-```bash
 git clone https://github.com/YOUR_USER/agent-wrangler.git
 cd agent-wrangler
+```
 
-# Copy example configs and edit with your project paths
+Python 3.7+ required. No pip install, no venv, no build step — just stdlib.
+
+## Setup
+
+Tell Agent Wrangler about your projects:
+
+```bash
 cp config/projects.example.json config/projects.json
-cp config/team_grid.example.json config/team_grid.json
-# Edit config/projects.json with your actual repo paths
-
-# Start everything: grid + manager + nav bindings
-./scripts/agent-wrangler start
-
-# Or run the interactive operator console
-./scripts/agent-wrangler ops
 ```
 
-## How it works
-
-After `agent-wrangler start`, you get two tmux windows:
-
-**Manager** (`Option+m`) — Claude Code on the left (~75%), auto-refreshing status rail on the right (~25%). The rail shows per-pane health dots, agent type, and status.
-
-**Grid** (`Option+g`) — Tiled panes, one per project. Each pane border shows health: `●` green (ok), `⚑` yellow (attention), `✖` red (problem). Active pane gets a bright white border with `▶` marker.
-
-```
-┌──────────────────────┬──────────────────────┐
-│ ● my-webapp          │ ⚑ api-server         │
-│                      │                      │
-│  $ claude            │  $ codex --yolo      │
-│  > working on auth   │  (waiting 3m)        │
-│                      │                      │
-├──────────────────────┼──────────────────────┤
-│ ● side-project       │ ✖ data-pipeline      │
-│                      │                      │
-│  $ aider             │  (idle 45m)          │
-│  > refactoring       │                      │
-│                      │                      │
-└──────────────────────┴──────────────────────┘
-```
-
-## Commands
-
-### Core
-
-```bash
-./scripts/agent-wrangler start          # Full startup: grid + manager + nav
-./scripts/agent-wrangler ops            # Interactive operator menu
-./scripts/agent-wrangler status         # Pane health overview
-./scripts/agent-wrangler watch          # Live-updating health table
-./scripts/agent-wrangler grid           # Curses pane browser
-```
-
-### Agent control
-
-```bash
-./scripts/agent-wrangler agent my-webapp claude       # Launch Claude in a pane
-./scripts/agent-wrangler agent api-server codex       # Launch Codex in a pane
-./scripts/agent-wrangler send my-webapp --command "git status"
-./scripts/agent-wrangler stop my-webapp               # Send Ctrl-C
-./scripts/agent-wrangler capture my-webapp --lines 40  # Grab scrollback
-./scripts/agent-wrangler hide my-webapp               # Hide pane (agent keeps running)
-./scripts/agent-wrangler show my-webapp               # Bring it back to the grid
-./scripts/agent-wrangler hidden                       # List all hidden panes
-```
-
-### Grid management
-
-```bash
-./scripts/agent-wrangler paint          # Color pane borders by health
-./scripts/agent-wrangler manager        # Start manager window
-./scripts/agent-wrangler rail           # Compact status sidebar
-./scripts/agent-wrangler import         # Import Ghostty tabs into tmux grid
-./scripts/agent-wrangler nav            # Enable Option+Arrow navigation
-```
-
-### Fleet (multi-session)
-
-```bash
-./scripts/agent-wrangler fleet set --sessions my-grid
-./scripts/agent-wrangler fleet status
-./scripts/agent-wrangler fleet watch --interval 3
-./scripts/agent-wrangler fleet jump --fzf    # Fuzzy-find across sessions
-./scripts/agent-wrangler fleet popup         # Quick triage popup
-```
-
-### Workflow
-
-```bash
-./scripts/agent-wrangler drift               # Repo cleanliness report
-./scripts/agent-wrangler doctor              # Health checks
-./scripts/agent-wrangler persistence save    # Save session layout
-./scripts/agent-wrangler persistence restore # Restore session layout
-./scripts/agent-wrangler profile list        # List workspace profiles
-```
-
-## Navigation keybindings
-
-| Key | Action |
-|---|---|
-| `Option+Arrow` | Move between panes |
-| `Option+[` / `Option+]` | Previous/next window |
-| `Option+m` | Jump to manager window |
-| `Option+g` | Jump to grid window |
-| `Option+z` | Zoom/unzoom current pane |
-| `Option+j` | Jump to pane by number |
-| `Option+1..9` | Jump to window by number |
-
-## Configuration
-
-### `config/projects.json`
-
-Register your projects. Each entry needs an `id`, `path`, and optionally a `startup_command` and `group`:
+Edit `config/projects.json` with your repo paths:
 
 ```json
 {
-  "groups": {
-    "work": { "max_active": 3 },
-    "personal": { "max_active": 2 }
-  },
   "projects": [
     {
       "id": "my-webapp",
       "name": "My Web App",
-      "group": "work",
       "path": "~/projects/my-webapp",
       "default_branch": "main",
       "startup_command": "npm run dev"
+    },
+    {
+      "id": "api-server",
+      "name": "API Server",
+      "path": "~/projects/api-server",
+      "default_branch": "main"
     }
   ]
 }
 ```
 
-### `config/team_grid.json`
+That's it. Each project gets a pane in the grid.
 
-Tmux session layout, fleet membership, profiles, and persistence settings.
+## Start
 
-### Environment variables
+```bash
+./scripts/agent-wrangler start
+```
 
-| Variable | Description |
+This does everything:
+1. Imports your running Ghostty/terminal tabs into tmux (matches by working directory)
+2. Creates a **grid window** with one pane per project
+3. Creates a **manager window** with Claude Code + a live status rail
+4. Enables keyboard navigation (Option+Arrow, Option+m/g, etc.)
+
+## Navigate
+
+| Shortcut | What it does |
 |---|---|
-| `AW_MAX_PANES` | Override maximum panes in grid (default from profile) |
+| `Option+g` | Switch to grid (your agent panes) |
+| `Option+m` | Switch to manager (Claude Code + status rail) |
+| `Option+Arrow` | Move between panes |
+| `Option+z` | Zoom current pane to fullscreen (toggle) |
+| `Option+j` | Jump to pane by number |
+| `Option+[` / `]` | Previous / next window |
 
-## Architecture
+## Control agents
 
+Launch an AI agent in any pane:
+
+```bash
+./scripts/agent-wrangler agent my-webapp claude
+./scripts/agent-wrangler agent api-server codex
 ```
-Layer 4  program_orchestrator.py   Phase-gated delivery (team roles, readiness gates)
-Layer 3  command_center.py         Planning board + runtime monitor
-Layer 2  tmux_teams.py             Grid control, health coloring, manager, rail
-         grid_navigator.py         Curses pane browser
-         session_stats.py          Context stats collection
-Layer 1  terminal_sentinel.py      Process/TTY monitoring, AI tool classification
-Layer 0  Ghostty / tmux            Terminal substrate
+
+Send commands, stop agents, or grab output:
+
+```bash
+./scripts/agent-wrangler send my-webapp --command "git status"
+./scripts/agent-wrangler stop my-webapp
+./scripts/agent-wrangler capture my-webapp --lines 40
 ```
 
-**tmux_teams.py** is the core engine — sessions, panes, health detection, fleet, persistence, Ghostty import.
+## Hide and show
 
-**terminal_sentinel.py** parses `ps` output to classify terminals and detect AI tools.
+Don't need a pane right now? Hide it. The agent keeps running in the background:
 
-**grid_navigator.py** is a curses pane browser with health coloring and agent launch shortcuts.
+```bash
+./scripts/agent-wrangler hide my-webapp
+./scripts/agent-wrangler show my-webapp
+./scripts/agent-wrangler hidden            # list what's hidden
+```
 
-**session_stats.py** collects scrollback size, uptime, and periodic `/usage` polls from idle Claude sessions.
+Or use `h` in the grid navigator (`./scripts/agent-wrangler grid`).
 
-## Grid navigator keys
+## Monitor
+
+The **status rail** (right side of manager window) auto-refreshes and shows:
+- Health dot per pane (green/yellow/red)
+- Agent type (claude, codex, aider, gemini)
+- Context window % and cost for Claude Code sessions
+- Hidden panes (dimmed)
+
+For a wider view:
+
+```bash
+./scripts/agent-wrangler watch             # live health table with CTX% and COST columns
+./scripts/agent-wrangler status            # one-shot health overview
+./scripts/agent-wrangler grid              # curses pane browser with actions
+```
+
+## Grid navigator
+
+Open with `./scripts/agent-wrangler grid`. A curses UI for quick pane management:
 
 | Key | Action |
 |---|---|
-| `j`/`k` or arrows | Navigate panes |
+| `j`/`k` | Navigate up/down |
 | `Enter` | Jump to pane |
-| `h` | Hide/show toggle (hidden panes appear dimmed at bottom) |
-| `c` | Launch Claude in pane |
-| `x` | Launch Codex in pane |
-| `s` | Send command to pane |
-| `K` | Send Ctrl-C to pane |
+| `h` | Hide/show toggle |
+| `c` | Launch Claude Code |
+| `x` | Launch Codex |
+| `s` | Send a command |
+| `K` | Send Ctrl-C |
 | `q` | Quit |
+
+## Fleet (multi-session)
+
+Managing multiple tmux sessions? Fleet gives you a unified view:
+
+```bash
+./scripts/agent-wrangler fleet set --sessions grid-1,grid-2
+./scripts/agent-wrangler fleet status
+./scripts/agent-wrangler fleet watch --interval 3
+./scripts/agent-wrangler fleet jump --fzf
+```
+
+## How it works
+
+Agent Wrangler is pure Bash + Python stdlib. No frameworks, no dependencies.
+
+- **`tmux_teams.py`** — Core engine. Creates sessions, manages panes, detects health, paints borders, runs the rail.
+- **`terminal_sentinel.py`** — Inspects process trees (`ps`) to classify terminals as active/waiting/idle and detect AI tools.
+- **`grid_navigator.py`** — Curses pane browser with health coloring and direct actions.
+- **`session_stats.py`** — Scrapes Claude Code's status bar for context %, tokens, and cost.
+
+```
+tmux_teams.py             Grid control, health coloring, manager, rail
+grid_navigator.py         Curses pane browser
+session_stats.py          Context stats collection
+terminal_sentinel.py      Process monitoring, AI tool classification
+────────────────────────────────────────────────────────
+Ghostty / tmux            Terminal substrate
+```
+
+## Environment variables
+
+| Variable | Description |
+|---|---|
+| `AW_MAX_PANES` | Max panes in grid (default: 10, or set via profile) |
 
 ## License
 
