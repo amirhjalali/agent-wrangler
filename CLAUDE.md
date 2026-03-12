@@ -55,7 +55,8 @@ After `agent-wrangler start`, the tmux session has two window types:
 ### Key Design Patterns
 
 - **Auto-discovery**: Ghostty terminals are discovered via process scanning. No config needed — terminals not in `projects.json` are imported using their directory basename and auto-registered.
-- **Health detection**: `terminal_sentinel.py` classifies processes by CPU usage with hysteresis (3% threshold to go active, 5% to break out of waiting) to prevent flapping.
+- **Health detection**: Scrollback-based — captures pane text and looks for the agent's prompt character (`❯` for Claude Code, `aider>` for Aider, etc.). Green = generating output, yellow = at prompt waiting for input. CPU-based detection doesn't work because AI tools think on remote servers.
+- **Zoomed navigation**: `Option+z` zooms a pane to fullscreen. `Option+n`/`Option+p` cycle panes while staying zoomed — each pane feels like a full terminal window.
 - **Notifications**: Optional (off by default). Desktop alerts via bundled macOS `.app` with debounce (2 consecutive checks) and cooldown (120s).
 
 ### Configuration Files (all in `config/`)
@@ -78,5 +79,5 @@ After `agent-wrangler start`, the tmux session has two window types:
 - Environment variables: `AW_MAX_PANES` (override max panes), `AW_NOTIFY` (enable notifications)
 - Health colors: green (active), yellow (waiting), red (problem)
 - AI tool markers: `claude`, `codex`, `aider`, `chatgpt`, `gemini`
-- Navigation: `Option+Arrow` (panes), `Option+[/]` (windows), `Option+m/g` (manager/grid), `Option+z` (zoom), `Option+j` (jump), `Option+q` (exit)
+- Navigation: `Option+Arrow` (panes), `Option+[/]` (windows), `Option+m/g` (manager/grid), `Option+z` (zoom), `Option+n/p` (cycle zoomed), `Option+j` (jump), `Option+q` (exit)
 - Mouse: click to select pane, scroll to browse output

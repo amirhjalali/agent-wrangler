@@ -23,5 +23,5 @@ cat <<'BANNER'
 BANNER
 printf "${RESET}"
 printf "${DIM}  Steering agents. Wrangling terminals. Shipping code.${RESET}\n"
-printf "${DIM}  ⌥m manager  ⌥g grid  ⌥← → panes  ⌥z zoom  ⌥j jump${RESET}\n\n"
+printf "${DIM}  ⌥m manager  ⌥g grid  ⌥z zoom  ⌥n/p cycle  ⌥j jump${RESET}\n\n"
 sleep 2

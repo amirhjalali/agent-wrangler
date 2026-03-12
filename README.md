@@ -68,6 +68,7 @@ This scans your home directory for git repos and lets you pick which ones to inc
 | `Option+m` | Switch to manager (Claude Code + status rail) |
 | `Option+Arrow` | Move between panes |
 | `Option+z` | Zoom current pane to fullscreen (toggle) |
+| `Option+n` / `p` | Next / previous pane (works while zoomed) |
 | `Option+j` | Jump to pane by number |
 | `Option+[` / `]` | Previous / next window |
 | `Option+q` | Exit Agent Wrangler |
@@ -158,7 +159,7 @@ Ghostty / tmux           Terminal substrate
 
 **Auto-discovery**: On startup, Agent Wrangler scans running Ghostty terminals via process trees. Each terminal is matched to a project by its working directory. Unmatched terminals are imported using their directory name — no config file required.
 
-**Health detection**: `terminal_sentinel.py` inspects CPU usage and process state to classify terminals as active (green), waiting (yellow), or stuck (red). Hysteresis prevents flapping between states.
+**Health detection**: Scrollback-based. Each pane's text is captured and checked for the agent's prompt character (`❯` for Claude Code, `aider>` for Aider). If the prompt is visible, the agent is waiting for input (yellow). If there's streaming output, it's working (green). This works because AI tools think on remote servers — local CPU tells you nothing.
 
 **Notifications**: Optional desktop alerts (macOS) when a pane goes red. Off by default — enable with `"notifications": true` in `config/team_grid.json` or `AW_NOTIFY=1`.
 

@@ -519,10 +519,48 @@ def detect_port_in_use(text: str) -> str | None:
     return match.group(1).strip() or None
 
 
+def detect_prompt_waiting(raw_text: str, agent: str) -> bool:
+    """Detect if an AI agent is at its input prompt by scanning pane text.
+
+    CPU-based detection doesn't work for AI tools because the thinking
+    happens on remote servers — local CPU is near-zero even when active.
+    Instead, look for the tool's prompt character in the last few lines.
+    """
+    if not raw_text or not agent:
+        return False
+    # Get last non-empty lines (skip status bar area at very bottom)
+    lines = [ln for ln in raw_text.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    # Check last ~10 meaningful lines for prompt patterns
+    tail = lines[-10:]
+    for line in reversed(tail):
+        stripped = line.strip()
+        # Skip Claude Code status bar lines
+        if any(k in stripped for k in ("Opus ", "Sonnet ", "Haiku ", "○○", "●●", "bypass permissions", "extra $")):
+            continue
+        # Skip separator lines
+        if stripped and all(c in "─━═—-" for c in stripped):
+            continue
+        # Claude Code prompt: ❯ or > at the start of a line (possibly with spaces)
+        if agent == "claude" and stripped in ("❯", ">", "❯ "):
+            return True
+        # Aider prompt
+        if agent == "aider" and (stripped.endswith("aider>") or stripped == ">"):
+            return True
+        # Codex / Gemini prompt
+        if agent in ("codex", "gemini") and stripped in (">", "❯"):
+            return True
+        # If we hit a non-status, non-separator, non-prompt line, it's output
+        return False
+    return False
+
+
 def pane_health_level(
     monitor: dict[str, Any],
     error_marker: str | None,
     wait_attention_min: int,
+    prompt_waiting: bool = False,
 ) -> tuple[str, bool, str]:
     status = str(monitor.get("status") or "idle")
     agent = str(monitor.get("agent") or "")
@@ -531,14 +569,20 @@ def pane_health_level(
     if error_marker:
         return "red", True, f"error: {error_marker}"
 
-    if status == "waiting" and agent:
-        if wait is None:
+    # Scrollback-based detection overrides CPU-based sentinel status.
+    # AI tools do their thinking on remote servers, so local CPU is
+    # near-zero even during active generation. The prompt character
+    # in the pane text is the reliable signal.
+    if agent and agent != "-":
+        if prompt_waiting:
+            # Agent is at its input prompt — waiting for user
+            if wait is not None and float(wait) >= float(wait_attention_min):
+                mins = int(wait)
+                return "red", True, f"waiting {mins}m"
             return "yellow", False, ""
-        mins = int(wait)
-        if float(wait) >= float(wait_attention_min):
-            return "red", True, f"waiting {mins}m"
-        # Only show wait time if > 0 minutes — "waiting 0m" is noise
-        return "yellow", False, f"waiting {mins}m" if mins > 0 else ""
+        else:
+            # No prompt visible — agent is generating or executing
+            return "green", False, ""
 
     if status == "background":
         return "yellow", False, "background"
@@ -624,10 +668,12 @@ def refresh_pane_health(
         error_marker = detect_error_marker(pane_text)
         missing_command = detect_missing_command(pane_text)
         port_in_use = detect_port_in_use(pane_text)
+        prompt_waiting = detect_prompt_waiting(raw_text, agent)
         level, needs_attention, reason = pane_health_level(
             monitor=monitor,
             error_marker=error_marker,
             wait_attention_min=wait_attention_min,
+            prompt_waiting=prompt_waiting,
         )
         if reason.startswith("error: zsh: command not found") and missing_command:
             reason = f"missing command: {missing_command}"
@@ -2372,6 +2418,9 @@ def run_nav(args: argparse.Namespace) -> int:
     utility_bindings = [
         ("M-z", ["resize-pane", "-Z"]),          # zoom toggle
         ("M-j", ["display-panes", "-d", "2000"]),  # jump by number overlay
+        # Zoomed navigation: cycle panes while staying fullscreen
+        ("M-n", ["select-pane", "-t", ":.+"]),   # next pane (works zoomed)
+        ("M-p", ["select-pane", "-t", ":.-"]),   # prev pane (works zoomed)
         ("M-q", ["confirm-before", "-p", "Exit Agent Wrangler? (y/n)", f"run-shell '{exit_script} exit --force'"]),
         ("M-s", ["display-popup", "-E", "-w", "80", "-h", "30",
                   f"python3 {summary_script} teams summary #{{pane_title}} --session {session} --lines 50; read"]),
@@ -2398,6 +2447,7 @@ def run_nav(args: argparse.Namespace) -> int:
     print("Window direct jump: Option+1..9")
     print("Named windows: Option+m (manager) | Option+g (grid)")
     print("Utilities: Option+z (zoom) | Option+j (jump) | Option+q (exit) | Option+s (summary)")
+    print("Zoomed nav: Option+n (next pane) | Option+p (prev pane)")
     print("Mouse: click pane to select | scroll to browse output")
     return 0
 
