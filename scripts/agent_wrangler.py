@@ -449,7 +449,7 @@ def batch_set_pane_options(pane_id: str, options: list[tuple[str, str]]) -> None
 
 _CC_MODEL_RE = re.compile(
     r"((?:Opus|Sonnet|Haiku)\s+[\d.]+)"
-    r"\s*\|.*?(\d+)k/(\d+)k\s*\((\d+)%\)"
+    r"\s*\|.*?(\d+)k?/(\d+)k\s*\((\d+)%\)"
     r"\s*\|.*?~?\$?([\d.]+)"
 )
 _CC_RATE_RE = re.compile(r"(\d+(?:hr|d))\s+[●○]+\s+(\d+)%")
