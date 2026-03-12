@@ -2964,7 +2964,6 @@ def run_ops(_: argparse.Namespace) -> int:
         ("Stop pane (Ctrl-C)", ["__stop__"]),
         ("Open manager window", ["manager", "--replace"]),
         ("Doctor (attention)", ["doctor", "--only-attention"]),
-        ("Program status", ["program", "status"]),
     ]
 
     print("Agent Wrangler Ops Console")
@@ -3121,7 +3120,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     nav.set_defaults(handler=run_nav)
 
     send = teams_sub.add_parser("send", help="Send command to one pane")
-    send.add_argument("pane", help="Pane id (%1), pane index (0), or pane title/project id")
+    send.add_argument("pane", help="Pane id (%%1), pane index (0), or pane title/project id")
     send.add_argument("--session", default=None)
     send.add_argument("--command", required=True)
     send.add_argument("--no-enter", action="store_true")

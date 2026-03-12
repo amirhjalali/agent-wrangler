@@ -1,36 +1,20 @@
 {
-  "groups": {
-    "work": {
-      "max_active": 3
-    },
-    "personal": {
-      "max_active": 2
-    }
-  },
   "projects": [
     {
       "id": "my-webapp",
       "name": "My Web App",
-      "group": "work",
       "path": "~/projects/my-webapp",
-      "default_branch": "main",
       "startup_command": "npm run dev"
     },
     {
       "id": "api-server",
       "name": "API Server",
-      "group": "work",
-      "path": "~/projects/api-server",
-      "default_branch": "main",
-      "startup_command": "python3 manage.py runserver"
+      "path": "~/projects/api-server"
     },
     {
       "id": "side-project",
       "name": "Side Project",
-      "group": "personal",
-      "path": "~/projects/side-project",
-      "default_branch": "main",
-      "startup_command": "npm run dev"
+      "path": "~/projects/side-project"
     }
   ]
 }
