@@ -1793,7 +1793,7 @@ def run_manager(args: argparse.Namespace) -> int:
             raise ValueError(err.strip() or f"failed to create manager window '{window}'")
 
         # Split right pane for status rail (~25% width)
-        rail_script = ROOT / "scripts" / "tmux_teams.py"
+        rail_script = ROOT / "scripts" / "agent_wrangler.py"
         rail_cmd = (
             f"python3 {shlex.quote(str(rail_script))} teams rail "
             f"--session {shlex.quote(session)} --interval {max(1, int(args.interval))}"
@@ -2368,7 +2368,7 @@ def run_nav(args: argparse.Namespace) -> int:
         ("M-g", ["select-window", "-t", f"{session}:grid"]),
     ]
     exit_script = str(ROOT / "scripts" / "agent-wrangler")
-    summary_script = str(ROOT / "scripts" / "tmux_teams.py")
+    summary_script = str(ROOT / "scripts" / "agent_wrangler.py")
     utility_bindings = [
         ("M-z", ["resize-pane", "-Z"]),          # zoom toggle
         ("M-j", ["display-panes", "-d", "2000"]),  # jump by number overlay
