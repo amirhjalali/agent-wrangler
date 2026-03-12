@@ -30,7 +30,6 @@ All commands run from the repo root.
 - `wrangler` -> `agent-wrangler`
 - `hq` -> `agent-wrangler up`
 - `teams` -> `tmux_teams.py`
-- `cc` -> `command_center.py` (legacy)
 - `workflow` -> `workflow_agent.py`
 - `termwatch` -> `terminal_sentinel.py`
 
@@ -49,25 +48,22 @@ After `agent-wrangler start`, the tmux session has three window types:
 
 ```
 Layer 3  program_orchestrator.py   Phase-gated delivery (team roles, loops, readiness gates)
-Layer 2  command_center.py         Ant Farm runtime monitor + operator console
-        tmux_teams.py             Tmux grid control (panes, sessions, health coloring, manager, rail)
+Layer 2  tmux_teams.py             Core engine: grid, manager, rail, health, nav, ops console
 Layer 1  terminal_sentinel.py      Process/TTY monitoring, AI tool classification
 Layer 0  Ghostty / tmux            Terminal substrate
 ```
 
 ### Command Routing
 
-`agent-wrangler` (bash) routes subcommands:
+`agent-wrangler` (bash) routes all subcommands directly to `tmux_teams.py`:
 - `start` -> welcome banner + `teams up` with manager + grid + nav flags
-- `up`, `status`, `paint`, `watch`, `nav`, `rail`, `exit`, etc. -> `command_center.py teams ...` -> delegates to `tmux_teams.py`
+- `ops` -> interactive operator console
+- `up`, `status`, `paint`, `watch`, `nav`, `rail`, `exit`, etc. -> `teams ...`
 - `program ...` -> `program_orchestrator.py` directly
-- `ops`, `antfarm` -> `command_center.py` directly
 
 ### Key Modules
 
-**`tmux_teams.py`** - The core engine. Manages tmux sessions, panes, health detection, persistence, profiles, hooks, and Ghostty-to-tmux import. The `run_manager` function creates a Claude Code + status rail split window. The `run_rail` function provides the compact auto-refreshing sidebar. Uses `@dataclass TmuxPane` as its primary data structure.
-
-**`command_center.py`** - Ant Farm (runtime session monitor for Ghostty terminals) + interactive operator console (`ops`). Thin dispatcher that delegates grid operations to `tmux_teams.py`.
+**`tmux_teams.py`** - The core engine. Manages tmux sessions, panes, health detection, persistence, profiles, hooks, Ghostty-to-tmux import, operator console, and notifications. The `run_manager` function creates a Claude Code + status rail split window. The `run_rail` function provides the compact auto-refreshing sidebar. Uses `@dataclass TmuxPane` as its primary data structure.
 
 **`program_orchestrator.py`** - Delivery roadmap with 4 phases, 6 team roles, 4 loop cadences, and 5 readiness gates. Computes a 0-100 readiness score. Phase 4 completion requires 92+ score for 7 consecutive days.
 
@@ -79,7 +75,6 @@ Layer 0  Ghostty / tmux            Terminal substrate
 
 - **`projects.json`** - Project registry. Each entry: `id`, `name`, `group` (business/personal), `path`, `default_branch`, `startup_command`. Two groups with WIP limits (business: 3, personal: 2).
 - **`team_grid.json`** - Tmux session config, workspace profiles (each profile sets `max_panes`), persistence settings.
-- **`command_center.json`** - Gastown cards and Ant Farm source settings.
 - **`impeccable_program.json`** - Phase definitions, team roles, loop cadences, readiness history.
 
 ### State and Reports

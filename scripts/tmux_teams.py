@@ -2865,6 +2865,72 @@ def run_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_ops_command(command: list[str]) -> int:
+    cmd = [str(ROOT / "scripts" / "agent-wrangler"), *command]
+    print("")
+    print("$ " + " ".join(cmd))
+    proc = subprocess.run(cmd, check=False)
+    return int(proc.returncode)
+
+
+def run_ops(_: argparse.Namespace) -> int:
+    """Interactive operator console — numbered menu for common actions."""
+    actions: list[tuple[str, list[str]]] = [
+        ("Start all (import + grid + manager + nav)", ["start"]),
+        ("Attach grid session", ["attach"]),
+        ("Show pane status", ["status"]),
+        ("Focus pane by project/token", ["__focus__"]),
+        ("Send command to pane", ["__send__"]),
+        ("Launch agent in pane", ["__agent__"]),
+        ("Stop pane (Ctrl-C)", ["__stop__"]),
+        ("Open manager window", ["manager", "--replace"]),
+        ("Doctor (attention)", ["doctor", "--only-attention"]),
+        ("Program status", ["program", "status"]),
+    ]
+
+    print("Agent Wrangler Ops Console")
+    print("Enter number, or q to quit.\n")
+
+    while True:
+        for idx, (label, _) in enumerate(actions, start=1):
+            print(f"{idx:>2}. {label}")
+        print(" q. Quit")
+
+        choice = input("\nops> ").strip().lower()
+        if choice in {"q", "quit", "exit"}:
+            return 0
+        if not choice or not choice.isdigit():
+            continue
+
+        idx = int(choice)
+        if idx < 1 or idx > len(actions):
+            print("Invalid choice.")
+            continue
+
+        _, command = actions[idx - 1]
+        if command == ["__focus__"]:
+            token = input("pane token: ").strip()
+            if token:
+                _run_ops_command(["focus", token, "--attach"])
+        elif command == ["__send__"]:
+            token = input("pane token: ").strip()
+            text = input("command: ").strip()
+            if token and text:
+                _run_ops_command(["send", token, "--command", text])
+        elif command == ["__agent__"]:
+            token = input("pane token: ").strip()
+            tool = input("tool (claude|codex|aider|gemini): ").strip().lower()
+            if token and tool in {"claude", "codex", "aider", "gemini"}:
+                _run_ops_command(["agent", token, tool])
+        elif command == ["__stop__"]:
+            token = input("pane token: ").strip()
+            if token:
+                _run_ops_command(["stop", token])
+        else:
+            _run_ops_command(command)
+        print("")
+
+
 def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None:
     teams = root_subparsers.add_parser("teams", help="Tmux team grid operations")
     teams_sub = teams.add_subparsers(dest="teams_command", required=True)
@@ -3153,9 +3219,16 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Tmux Team Grid")
+    parser = argparse.ArgumentParser(prog="agent-wrangler", description="Agent Wrangler")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    # Top-level ops command
+    ops_parser = sub.add_parser("ops", help="Interactive operator console")
+    ops_parser.set_defaults(handler=run_ops)
+
+    # All teams subcommands registered under "teams" namespace
     register_subparser(sub)
+
     args = parser.parse_args()
     handler = getattr(args, "handler", None)
     if not handler:

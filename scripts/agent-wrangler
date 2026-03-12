@@ -40,30 +40,25 @@ PY
 
 if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
-Agent Wrangler shortcuts:
-  start
-    -> Manager (Claude Code + status rail) + Grid (project panes)
-  ops
-    -> Interactive operator console (numbered menu)
-  init
-    -> Interactive project setup (scan repos, create config)
-  add [path]
-    -> Add a project to config + running grid
-  exit | quit
-    -> Kill the Agent Wrangler session (or press Option+q)
-  summary <pane>
-    -> Show recent output from a pane (or press Option+s)
+Agent Wrangler — manage teams of AI coding agents from one terminal.
+
+Commands:
+  start             Import terminals + grid + manager + nav
+  ops               Interactive operator console
+  init              Interactive project setup (scan repos)
+  add [path]        Add a project to config + running grid
+  status            Show pane health overview
+  summary <pane>    Show recent output from a pane
+  exit | quit       Kill the Agent Wrangler session
 
 Examples:
   ./scripts/agent-wrangler init
   ./scripts/agent-wrangler start
   ./scripts/agent-wrangler add .
-  ./scripts/agent-wrangler add ~/projects/my-app --name my-app
   ./scripts/agent-wrangler summary my-webapp
   ./scripts/agent-wrangler exit
 EOF
-  echo ""
-  exec python3 "$SCRIPT_DIR/command_center.py" --help
+  exit 0
 fi
 
 case "${1:-}" in
@@ -89,4 +84,4 @@ case "${1:-}" in
     ;;
 esac
 
-exec python3 "$SCRIPT_DIR/command_center.py" "$@"
+exec python3 "$SCRIPT_DIR/tmux_teams.py" "$@"
