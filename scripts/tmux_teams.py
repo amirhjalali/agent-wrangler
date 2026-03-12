@@ -314,9 +314,18 @@ def infer_project_id_from_session(session: dict[str, Any], proj_map: dict[str, d
     pid = int(session.get("pid") or 0)
     cwd = process_cwd(pid)
     if cwd:
+        # Try matching against known projects first
         project_id = infer_project_id_from_path(cwd, proj_map)
         if project_id:
             return project_id, cwd
+        # No match — use directory basename as project ID (auto-discover)
+        norm_cwd = os.path.abspath(cwd)
+        home = os.path.expanduser("~")
+        if norm_cwd == home or norm_cwd == "/":
+            return None, cwd
+        basename = os.path.basename(norm_cwd)
+        if basename:
+            return basename, cwd
 
     command = str(session.get("command") or "")
     project_id = infer_project_id_from_command(command, proj_map)
@@ -1176,6 +1185,10 @@ def ghostty_import_plan(
             )
             continue
 
+        # Auto-discovered terminal (not in projects.json) — register with cwd
+        if project_id not in proj_map and cwd:
+            project_overrides[project_id] = {"path": cwd, "name": project_id}
+
         mapped_project_id = project_id
         if preserve_duplicates:
             if len(project_ids) >= max(1, max_panes):
@@ -1184,7 +1197,8 @@ def ghostty_import_plan(
             duplicate_counts[project_id] = seen
             if seen > 1:
                 mapped_project_id = f"{project_id}__dup{seen}"
-                project_overrides[mapped_project_id] = dict(proj_map.get(project_id, {}))
+                base = proj_map.get(project_id, project_overrides.get(project_id, {}))
+                project_overrides[mapped_project_id] = dict(base)
             project_ids.append(mapped_project_id)
         else:
             if project_id not in project_ids:
@@ -1210,6 +1224,58 @@ def ghostty_import_plan(
         )
 
     return project_ids, agent_by_project, project_overrides, mapped, unmatched
+
+
+def _auto_register_projects(
+    project_ids: list[str],
+    project_overrides: dict[str, dict[str, Any]],
+    proj_map: dict[str, dict[str, Any]],
+) -> None:
+    """Auto-add discovered terminals to projects.json so they're remembered."""
+    new_projects: list[dict[str, Any]] = []
+    for pid in project_ids:
+        # Skip duplicates and already-known projects
+        base_id = pid.split("__dup")[0]
+        if base_id in proj_map:
+            continue
+        override = project_overrides.get(pid, {})
+        path = str(override.get("path") or "")
+        if not path:
+            continue
+        new_projects.append({
+            "id": base_id,
+            "name": base_id,
+            "path": path,
+            "group": "personal",
+            "default_branch": "main",
+            "startup_command": "",
+        })
+
+    if not new_projects:
+        return
+
+    # Deduplicate by id
+    seen_ids: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for p in new_projects:
+        if p["id"] not in seen_ids:
+            seen_ids.add(p["id"])
+            unique.append(p)
+
+    try:
+        config: dict[str, Any] = {}
+        if PROJECTS_CONFIG.exists():
+            config = json.loads(PROJECTS_CONFIG.read_text(encoding="utf-8"))
+        existing_ids = {p["id"] for p in config.get("projects", [])}
+        added = [p for p in unique if p["id"] not in existing_ids]
+        if added:
+            config.setdefault("projects", []).extend(added)
+            PROJECTS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+            names = ", ".join(p["id"] for p in added)
+            print(f"Auto-registered: {names}")
+    except Exception:
+        pass  # Non-critical — don't fail the import
 
 
 def run_bootstrap(args: argparse.Namespace) -> int:
@@ -1266,7 +1332,10 @@ def run_import(args: argparse.Namespace) -> int:
         preserve_duplicates=args.preserve_duplicates,
     )
     if not project_ids:
-        raise ValueError("No Ghostty sessions matched known project paths. Keep current setup or pass explicit projects.")
+        raise ValueError("No active Ghostty terminals found.")
+
+    # Auto-register discovered terminals into projects.json
+    _auto_register_projects(project_ids, project_overrides, proj_map)
 
     resolved_layout = choose_layout(layout, pane_count=len(project_ids))
     if args.dry_run:
@@ -1378,10 +1447,9 @@ def run_up(args: argparse.Namespace) -> int:
                     project_overrides = None
                     print("No Ghostty matches found; using configured project selection fallback.")
                 else:
-                    raise ValueError(
-                        "No Ghostty sessions matched known project paths. Pass --mode bootstrap or provide --projects."
-                    )
+                    raise ValueError("No active Ghostty terminals found.")
             else:
+                _auto_register_projects(project_ids, project_overrides, proj_map)
                 print(f"Ghostty mapping: matched={len(mapped)} unmatched={len(unmatched)}")
 
         resolved_layout, _ = create_grid_session(
