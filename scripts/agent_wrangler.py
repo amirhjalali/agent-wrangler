@@ -717,43 +717,24 @@ def refresh_pane_health(
             }
         )
 
-    # Update status bar with aggregate stats
+    # Update status bar with per-project health tabs
     if apply_colors and rows:
-        counts = {"green": 0, "yellow": 0, "red": 0}
-        agents = 0
-        total_ctx = 0
-        total_cost = 0.0
-        ctx_count = 0
+        tab_parts = []
         for row in rows:
+            pid = str(row.get("project_id") or "?")
             lev = str(row.get("health") or "").lower()
-            if lev in counts:
-                counts[lev] += 1
-            if row.get("agent") not in (None, "-", ""):
-                agents += 1
-            cc = row.get("cc_stats")
-            if cc and cc.get("context_pct") is not None:
-                total_ctx += int(cc["context_pct"])
-                ctx_count += 1
-                total_cost += float(cc.get("cost") or 0)
-        avg_ctx = total_ctx // ctx_count if ctx_count else 0
+            if len(pid) > 14:
+                pid = pid[:13] + "~"
+            dot_color = {"green": "colour34", "yellow": "colour220", "red": "colour196"}.get(lev, "colour250")
+            tab_parts.append(f"#[fg={dot_color}]●#[fg=colour250] {pid}")
+        tabs_str = " #[fg=colour240]│#[default] ".join(tab_parts)
         status_right = (
-            f"#[fg=colour34]{counts['green']}g#[default] "
-            f"#[fg=colour220]{counts['yellow']}y#[default] "
-            f"#[fg=colour196]{counts['red']}r#[default]"
-        )
-        if agents:
-            status_right += f" #[fg=colour75]|#[default] {agents} agents"
-        if ctx_count:
-            ctx_color = "colour196" if avg_ctx >= 80 else "colour220" if avg_ctx >= 50 else "colour34"
-            status_right += f" #[fg={ctx_color}]{avg_ctx}%#[default]"
-        if total_cost > 0:
-            status_right += f" #[fg=colour245]${total_cost:.2f}#[default]"
-        status_right += (
-            " #{?window_zoomed_flag,#[fg=colour214 bold] ZOOM #[default],}"
+            f" {tabs_str} "
+            "#{?window_zoomed_flag,#[fg=colour214 bold] ZOOM #[default],}"
             " #[fg=colour250]%H:%M#[default] "
         )
         tmux(["set-option", "-t", session, "status-right", status_right], timeout=3)
-        tmux(["set-option", "-t", session, "status-right-length", "60"], timeout=3)
+        tmux(["set-option", "-t", session, "status-right-length", "120"], timeout=3)
 
     # Desktop notifications on health state changes
     if apply_colors:
@@ -1183,7 +1164,7 @@ def create_grid_session(
             raise ValueError(err.strip() or f"failed to set pane title for {pane.pane_id}")
 
         # Show project context without clearing — preserves shell state
-        pane_send(pane.pane_id, f"echo '\\n[{project_id}] ready'", enter=True)
+        pane_send(pane.pane_id, f"echo '\\n  [{project_id}] ready'", enter=True)
 
         startup_command = str(project.get("startup_command") or "").strip()
         if startup_command and not no_startup:
@@ -2391,6 +2372,37 @@ def run_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_context_menu_cmd(session: str) -> list[str]:
+    """Build a tmux display-menu command for right-click pane management."""
+    aw = str(ROOT / "scripts" / "agent-wrangler")
+    aw_py = str(ROOT / "scripts" / "agent_wrangler.py")
+    menu_items: list[tuple[str, str, str]] = [
+        ("Zoom", "z", "resize-pane -Z"),
+        ("View Output", "o",
+         f"display-popup -E -w 80 -h 30 "
+         f"'python3 {aw_py} teams summary "
+         f"#{{pane_title}} --session {session} --lines 50; read'"),
+        ("Send Command...", "c",
+         f"command-prompt -p 'command:' "
+         f"\"run-shell '{aw} send #{{pane_title}} --command \\\"%%\\\"'\""),
+        ("", "", ""),
+        ("Start Claude", "1", f"run-shell '{aw} agent #{{pane_title}} claude'"),
+        ("Start Codex", "2", f"run-shell '{aw} agent #{{pane_title}} codex'"),
+        ("Start Aider", "3", f"run-shell '{aw} agent #{{pane_title}} aider'"),
+        ("", "", ""),
+        ("Restart", "r", f"run-shell '{aw} restart #{{pane_title}}'"),
+        ("Stop (Ctrl-C)", "s", f"run-shell '{aw} stop #{{pane_title}}'"),
+        ("Kill", "k", f"run-shell '{aw} kill #{{pane_title}}'"),
+    ]
+    args_list = ["display-menu", "-T", "#[bold]#{pane_title}", "-x", "R", "-y", "S"]
+    for label, key, cmd in menu_items:
+        if not label:
+            args_list.append("")
+        else:
+            args_list.extend([label, key, cmd])
+    return args_list
+
+
 def run_nav(args: argparse.Namespace) -> int:
     ensure_tmux()
     pane_bindings = [
@@ -2436,19 +2448,22 @@ def run_nav(args: argparse.Namespace) -> int:
     for key, cmd in all_bindings:
         tmux(["bind-key", "-n", key, *cmd], timeout=5)
 
-    # Enable mouse: click to select pane, scroll to browse pane content (not shell history)
-    tmux(["set-option", "-g", "mouse", "on"], timeout=5)
-    # Scroll sends scroll events to the pane (enters copy mode), not Up/Down keys
-    tmux(["set-option", "-g", "terminal-overrides", "xterm*:smcup@:rmcup@"], timeout=5)
+    # Double-click to zoom/unzoom a pane
+    tmux(["bind-key", "-n", "DoubleClick1Pane", "resize-pane", "-Z"], timeout=5)
 
-    print("Enabled no-prefix Alt navigation bindings.")
-    print("Pane navigation: Option+Arrow | mouse click")
-    print("Window navigation: Option+[ / Option+]")
-    print("Window direct jump: Option+1..9")
-    print("Named windows: Option+m (manager) | Option+g (grid)")
-    print("Utilities: Option+z (zoom) | Option+j (jump) | Option+q (exit) | Option+s (summary)")
-    print("Zoomed nav: Option+n (next pane) | Option+p (prev pane)")
-    print("Mouse: click pane to select | scroll to browse output")
+    # Right-click context menu for pane management
+    menu_cmd = _build_context_menu_cmd(session)
+    tmux(["bind-key", "-n", "MouseDown3Pane", *menu_cmd], timeout=5)
+
+    # Source Ghostty-optimized tmux config if available
+    tmux_conf = ROOT / "config" / "tmux.conf"
+    if tmux_conf.exists():
+        tmux(["source-file", str(tmux_conf)], timeout=5)
+
+    print("Enabled navigation bindings.")
+    print("Mouse: click select | double-click zoom | right-click menu | scroll browse")
+    print("Zoomed: Option+n (next) | Option+p (prev) | Option+z (unzoom)")
+    print("Windows: Option+m (manager) | Option+g (grid) | Option+[ / ]")
     return 0
 
 

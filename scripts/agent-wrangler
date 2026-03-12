@@ -55,7 +55,7 @@ case "${1:-}" in
     shift
     bash "$SCRIPT_DIR/welcome_banner.sh"
     MAX_PANES="$(resolve_max_panes)"
-    set -- teams up --rebuild --mode import --preserve-duplicates --max-panes "$MAX_PANES" --startup --agent --nav --manager --manager-replace "$@"
+    set -- teams up --rebuild --mode import --preserve-duplicates --max-panes "$MAX_PANES" --startup --nav --manager --manager-replace "$@"
     ;;
   exit|quit)
     shift

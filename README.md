@@ -44,6 +44,20 @@ cd agent-wrangler
 
 Python 3.10+ required. No pip install, no venv, no build step — just stdlib.
 
+## Ghostty Setup (Recommended)
+
+Agent Wrangler works best inside Ghostty. Add to your Ghostty config (`~/Library/Application Support/com.mitchellh.ghostty/config`):
+
+```
+macos-option-as-alt = true
+mouse-hide-while-typing = true
+window-padding-x = 4
+window-padding-y = 4
+window-padding-balance = true
+```
+
+`macos-option-as-alt` is required for Option+key navigation to work.
+
 ## Start
 
 ```bash
@@ -72,8 +86,10 @@ This scans your home directory for git repos and lets you pick which ones to inc
 | `Option+j` | Jump to pane by number |
 | `Option+[` / `]` | Previous / next window |
 | `Option+q` | Exit Agent Wrangler |
-| **Mouse click** | Select a pane |
-| **Mouse scroll** | Scroll pane output |
+| **Click** | Select a pane |
+| **Double-click** | Zoom pane to fullscreen |
+| **Right-click** | Context menu (start agent, send command, etc.) |
+| **Scroll** | Browse pane output |
 
 ## Control agents
 

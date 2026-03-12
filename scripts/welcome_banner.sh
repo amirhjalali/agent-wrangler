@@ -24,4 +24,4 @@ BANNER
 printf "${RESET}"
 printf "${DIM}  Steering agents. Wrangling terminals. Shipping code.${RESET}\n"
 printf "${DIM}  ⌥m manager  ⌥g grid  ⌥z zoom  ⌥n/p cycle  ⌥j jump${RESET}\n\n"
-sleep 2
+sleep 1

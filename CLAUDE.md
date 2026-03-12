@@ -80,4 +80,22 @@ After `agent-wrangler start`, the tmux session has two window types:
 - Health colors: green (active), yellow (waiting), red (problem)
 - AI tool markers: `claude`, `codex`, `aider`, `chatgpt`, `gemini`
 - Navigation: `Option+Arrow` (panes), `Option+[/]` (windows), `Option+m/g` (manager/grid), `Option+z` (zoom), `Option+n/p` (cycle zoomed), `Option+j` (jump), `Option+q` (exit)
-- Mouse: click to select pane, scroll to browse output
+- Mouse: click select, double-click zoom, right-click context menu, scroll browse
+
+## Manager Mode
+
+When running as the manager session (the left pane of the manager window), you can orchestrate all project agents using the CLI:
+
+### Quick Reference
+- `./scripts/agent-wrangler status` — See all pane health
+- `./scripts/agent-wrangler summary <project>` — Recent output from a pane
+- `./scripts/agent-wrangler capture <project> --lines 50` — Raw pane text
+- `./scripts/agent-wrangler agent <project> claude` — Start Claude in a pane
+- `./scripts/agent-wrangler send <project> --command "..."` — Send text to a pane
+- `./scripts/agent-wrangler stop <project>` — Send Ctrl-C
+- `./scripts/agent-wrangler restart <project>` — Restart with startup command
+
+### Managed Projects
+@/Users/amirjalali/creator-studio/CLAUDE.md
+@/Users/amirjalali/gabooja-labs/CLAUDE.md
+@/Users/amirjalali/gabooja-knowledge-base/CLAUDE.md
