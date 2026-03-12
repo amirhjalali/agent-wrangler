@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 import terminal_sentinel
-import workflow_agent
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "team_grid.json"
@@ -26,6 +25,7 @@ PERSISTENCE_DIR = ROOT / ".state" / "persistence"
 
 DEFAULT_SESSION = "amir-grid"
 DEFAULT_LAYOUT = "auto"
+PROJECTS_CONFIG = ROOT / "config" / "projects.json"
 VALID_LAYOUTS = {"tiled", "even-horizontal", "even-vertical", "main-horizontal", "main-vertical"}
 LAYOUT_CHOICES = sorted(VALID_LAYOUTS | {"auto"})
 DEFAULT_LIMIT = 6
@@ -205,8 +205,18 @@ def tmux_resurrect_scripts() -> tuple[Path, Path]:
     return (base / "save.sh", base / "restore.sh")
 
 
+def load_projects_config() -> dict[str, Any]:
+    """Load projects.json. Returns empty config if file doesn't exist."""
+    if not PROJECTS_CONFIG.exists():
+        return {"projects": []}
+    try:
+        return json.loads(PROJECTS_CONFIG.read_text(encoding="utf-8"))
+    except Exception:
+        return {"projects": []}
+
+
 def project_map() -> dict[str, dict[str, Any]]:
-    config = workflow_agent.load_config()
+    config = load_projects_config()
     projects = config.get("projects", [])
     return {project["id"]: project for project in projects}
 
@@ -250,7 +260,7 @@ def choose_projects(
         return explicit
 
     selected: list[str] = []
-    for project in workflow_agent.load_config().get("projects", []):
+    for project in load_projects_config().get("projects", []):
         if group and str(project.get("group", "")).lower() != group.lower():
             continue
         selected.append(project["id"])
@@ -523,10 +533,12 @@ def pane_health_level(
 
     if status == "waiting" and agent:
         if wait is None:
-            return "red", True, "waiting"
+            return "yellow", False, ""
+        mins = int(wait)
         if float(wait) >= float(wait_attention_min):
-            return "red", True, f"waiting {int(wait)}m"
-        return "yellow", False, f"waiting {int(wait)}m"
+            return "red", True, f"waiting {mins}m"
+        # Only show wait time if > 0 minutes — "waiting 0m" is noise
+        return "yellow", False, f"waiting {mins}m" if mins > 0 else ""
 
     if status == "background":
         return "yellow", False, "background"
@@ -2622,7 +2634,7 @@ def run_hidden(args: argparse.Namespace) -> int:
 
 
 def run_list_projects(args: argparse.Namespace) -> int:
-    config = workflow_agent.load_config()
+    config = load_projects_config()
     group = args.group.lower() if args.group else None
     print(f"{'ID':<22} {'GROUP':<10} PATH")
     for project in config.get("projects", []):
@@ -2633,7 +2645,6 @@ def run_list_projects(args: argparse.Namespace) -> int:
     return 0
 
 
-PROJECTS_CONFIG = ROOT / "config" / "projects.json"
 NOTIFY_STATE_PATH = ROOT / ".state" / "health_state.json"
 NOTIFY_APP_PATH = ROOT / "assets" / "AgentWrangler.app"
 NOTIFY_COOLDOWN_SEC = 120  # Minimum seconds between notifications

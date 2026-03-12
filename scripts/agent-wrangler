@@ -16,25 +16,16 @@ resolve_max_panes() {
   fi
 
   python3 - "$config_path" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-default = 10
+import json, sys
 try:
-    with open(path, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    profiles = data.get("profiles", {}) if isinstance(data, dict) else {}
-    current = str(profiles.get("current") or "default")
-    items = profiles.get("items", {}) if isinstance(profiles.get("items"), dict) else {}
-    item = items.get(current, {}) if isinstance(items.get(current), dict) else {}
-    value = item.get("max_panes")
+    data = json.load(open(sys.argv[1]))
+    items = data.get("profiles", {}).get("items", {})
+    current = str(data.get("profiles", {}).get("current") or "default")
+    value = items.get(current, {}).get("max_panes")
     if isinstance(value, int) and value > 0:
-        print(value)
-        raise SystemExit(0)
-except Exception:
-    pass
-print(default)
+        print(value); raise SystemExit(0)
+except Exception: pass
+print(10)
 PY
 }
 
@@ -42,21 +33,19 @@ if [[ $# -eq 0 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 Agent Wrangler — manage teams of AI coding agents from one terminal.
 
-Commands:
-  start             Import terminals + grid + manager + nav
-  ops               Interactive operator console
-  init              Interactive project setup (scan repos)
-  add [path]        Add a project to config + running grid
+Usage: agent-wrangler <command>
+
+  start             Launch grid + manager + nav (pulls in all Ghostty terminals)
   status            Show pane health overview
+  add [path]        Add a project to the running grid
   summary <pane>    Show recent output from a pane
-  exit | quit       Kill the Agent Wrangler session
+  ops               Interactive operator console
+  exit              Kill the Agent Wrangler session
 
 Examples:
-  ./scripts/agent-wrangler init
   ./scripts/agent-wrangler start
   ./scripts/agent-wrangler add .
   ./scripts/agent-wrangler summary my-webapp
-  ./scripts/agent-wrangler exit
 EOF
   exit 0
 fi
@@ -72,16 +61,12 @@ case "${1:-}" in
     shift
     set -- teams exit "$@"
     ;;
-  init|add|summary)
+  add|summary|init)
     set -- teams "$@"
     ;;
   up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail|hide|show|hidden)
     set -- teams "$@"
     ;;
-  program)
-    shift
-    exec python3 "$SCRIPT_DIR/program_orchestrator.py" "$@"
-    ;;
 esac
 
-exec python3 "$SCRIPT_DIR/tmux_teams.py" "$@"
+exec python3 "$SCRIPT_DIR/agent_wrangler.py" "$@"

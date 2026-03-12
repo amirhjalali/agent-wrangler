@@ -14,7 +14,7 @@
 
 **Manage teams of AI coding agents from one terminal.**
 
-Agent Wrangler gives you a tmux grid where each pane is a project with an AI agent (Claude Code, Codex, Aider, Gemini). Color-coded borders show you which agents are working, waiting, or broken. One command to start, keyboard shortcuts to navigate.
+Agent Wrangler gives you a tmux grid where each pane is a project with an AI agent (Claude Code, Codex, Aider, Gemini). Color-coded borders show which agents are working, waiting, or broken. One command to start, zero config required.
 
 ```
 ┌──── ● my-webapp ────────┬──── ⚑ api-server ────────┐
@@ -38,23 +38,11 @@ Agent Wrangler gives you a tmux grid where each pane is a project with an AI age
 ```bash
 brew install tmux
 
-git clone https://github.com/YOUR_USER/agent-wrangler.git
+git clone https://github.com/AmirhJalworker/agent-wrangler.git
 cd agent-wrangler
 ```
 
-Python 3.7+ required. No pip install, no venv, no build step — just stdlib.
-
-## Setup
-
-The fastest way — auto-scan your home directory for git repos:
-
-```bash
-./scripts/agent-wrangler init
-```
-
-This finds all repos in `~/`, lets you pick which ones to include, and creates your config.
-
-Or do it manually: `cp config/projects.example.json config/projects.json` and edit the paths.
+Python 3.10+ required. No pip install, no venv, no build step — just stdlib.
 
 ## Start
 
@@ -62,11 +50,15 @@ Or do it manually: `cp config/projects.example.json config/projects.json` and ed
 ./scripts/agent-wrangler start
 ```
 
-This does everything:
-1. Imports your running Ghostty/terminal tabs into tmux (matches by working directory)
-2. Creates a **grid window** with one pane per project
-3. Creates a **manager window** with Claude Code + a live status rail
-4. Enables keyboard navigation (Option+Arrow, Option+m/g, etc.)
+That's it. Agent Wrangler auto-discovers your running Ghostty terminals, imports them into a tmux grid, and sets up a manager window with Claude Code + a live status rail. No config file needed.
+
+If you want more control, create a project list:
+
+```bash
+./scripts/agent-wrangler init
+```
+
+This scans your home directory for git repos and lets you pick which ones to include.
 
 ## Navigate
 
@@ -99,28 +91,14 @@ Send commands, stop agents, or grab output:
 ./scripts/agent-wrangler capture my-webapp --lines 40
 ```
 
-## Hide and show
-
-Don't need a pane right now? Hide it. The agent keeps running in the background:
-
-```bash
-./scripts/agent-wrangler hide my-webapp
-./scripts/agent-wrangler show my-webapp
-./scripts/agent-wrangler hidden            # list what's hidden
-```
-
-Or use `h` in the grid navigator (`./scripts/agent-wrangler grid`).
-
 ## Add projects on the fly
-
-Add the current directory to your grid without editing config:
 
 ```bash
 cd ~/projects/new-thing
 ./scripts/agent-wrangler add .
 ```
 
-Or specify a path and name:
+Or specify a path:
 
 ```bash
 ./scripts/agent-wrangler add ~/projects/cool-app --name cool-app
@@ -147,54 +125,49 @@ The **status rail** (right side of manager window) auto-refreshes and shows:
 - Agent type (claude, codex, aider, gemini)
 - Context window % and cost for Claude Code sessions
 - Hidden panes (dimmed)
-- Desktop notifications when a pane goes red or recovers (macOS)
+- Desktop notifications when a pane goes red (macOS, opt-in)
 
-For a wider view:
+Other monitoring commands:
 
 ```bash
-./scripts/agent-wrangler watch             # live health table with CTX% and COST columns
+./scripts/agent-wrangler watch             # live health table
 ./scripts/agent-wrangler status            # one-shot health overview
-./scripts/agent-wrangler grid              # curses pane browser with actions
 ```
 
-## Grid navigator
+## Hide and show
 
-Open with `./scripts/agent-wrangler grid`. A curses UI for quick pane management:
+Don't need a pane right now? Hide it — the agent keeps running in the background:
 
-| Key | Action |
-|---|---|
-| `j`/`k` | Navigate up/down |
-| `Enter` | Jump to pane |
-| `h` | Hide/show toggle |
-| `c` | Launch Claude Code |
-| `x` | Launch Codex |
-| `s` | Send a command |
-| `K` | Send Ctrl-C |
-| `q` | Quit |
+```bash
+./scripts/agent-wrangler hide my-webapp
+./scripts/agent-wrangler show my-webapp
+./scripts/agent-wrangler hidden            # list what's hidden
+```
 
 ## How it works
 
 Agent Wrangler is pure Bash + Python stdlib. No frameworks, no dependencies.
 
-- **`tmux_teams.py`** — Core engine. Creates sessions, manages panes, detects health, paints borders, runs the rail.
-- **`terminal_sentinel.py`** — Inspects process trees (`ps`) to classify terminals as active/waiting/idle and detect AI tools.
-- **`grid_navigator.py`** — Curses pane browser with health coloring and direct actions.
-- **`session_stats.py`** — Scrapes Claude Code's status bar for context %, tokens, and cost.
+```
+agent-wrangler           Bash router
+agent_wrangler.py        Grid control, health coloring, manager, rail, ops
+terminal_sentinel.py     Process monitoring, AI tool classification
+───────────────────────────────────────────────────
+Ghostty / tmux           Terminal substrate
+```
 
-```
-tmux_teams.py             Grid control, health coloring, manager, rail
-grid_navigator.py         Curses pane browser
-session_stats.py          Context stats collection
-terminal_sentinel.py      Process monitoring, AI tool classification
-────────────────────────────────────────────────────────
-Ghostty / tmux            Terminal substrate
-```
+**Auto-discovery**: On startup, Agent Wrangler scans running Ghostty terminals via process trees. Each terminal is matched to a project by its working directory. Unmatched terminals are imported using their directory name — no config file required.
+
+**Health detection**: `terminal_sentinel.py` inspects CPU usage and process state to classify terminals as active (green), waiting (yellow), or stuck (red). Hysteresis prevents flapping between states.
+
+**Notifications**: Optional desktop alerts (macOS) when a pane goes red. Off by default — enable with `"notifications": true` in `config/team_grid.json` or `AW_NOTIFY=1`.
 
 ## Environment variables
 
 | Variable | Description |
 |---|---|
 | `AW_MAX_PANES` | Max panes in grid (default: 10, or set via profile) |
+| `AW_NOTIFY` | Enable desktop notifications (`1` to enable) |
 
 ## License
 
