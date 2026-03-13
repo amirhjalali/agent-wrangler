@@ -44,6 +44,51 @@ MISSING_COMMAND_PATTERN = re.compile(r"command not found:\s*([a-z0-9._/+:-]+)")
 PORT_IN_USE_PATTERN = re.compile(r"port\s+(\d+)\s+is\s+in\s+use")
 HOOK_EVENTS = ("after-split-window", "after-new-window", "client-session-changed")
 
+# --- Sound system (Phase 8) ---
+SOUND_COOLDOWN: dict[str, float] = {}  # key → last play time
+SOUND_COOLDOWN_SEC = 10  # minimum seconds between sounds per key
+
+
+def _sounds_enabled() -> bool:
+    """Check if sounds are enabled. Off by default."""
+    if os.environ.get("AW_SOUNDS", "").strip() in ("1", "true", "yes"):
+        return True
+    try:
+        store = load_store()
+        return bool(store.get("sounds", False))
+    except Exception:
+        return False
+
+
+def play_sound(name: str, volume: float = 0.5, key: str = "") -> None:
+    """Play a macOS system sound non-blocking. Silently does nothing if unavailable."""
+    if not _sounds_enabled():
+        return
+    if key:
+        now = time.time()
+        if now - SOUND_COOLDOWN.get(key, 0) < SOUND_COOLDOWN_SEC:
+            return
+        SOUND_COOLDOWN[key] = now
+    path = Path(f"/System/Library/Sounds/{name}.aiff")
+    if path.exists():
+        try:
+            subprocess.Popen(
+                ["afplay", "-v", str(volume), str(path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            pass
+
+
+# --- Health history for sparklines (Phase 2) ---
+_health_history: dict[str, list[int]] = {}  # project_id → last N health values
+_prev_rail_health: dict[str, str] = {}  # project_id → previous health level
+_prev_rail_costs: dict[str, float] = {}  # project_id → previous cost
+_sparkle_countdown: dict[str, int] = {}  # project_id → frames remaining for ✦
+_transition_state: dict[str, list[str]] = {}  # project_id → color transition queue
+_campfire_frame: int = 0  # flickering campfire frame counter
+
 
 @dataclass
 class TmuxPane:
@@ -415,6 +460,49 @@ def session_monitor_by_tty() -> dict[str, dict[str, Any]]:
     return {str(item.get("tty")): item for item in snapshot.get("sessions", [])}
 
 
+def _build_session_indexes(
+    snapshot: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Build TTY-keyed and path-keyed indexes from sentinel sessions.
+
+    Path index maps normalized absolute paths to AI sessions (Ghostty tabs).
+    When a tmux pane's TTY doesn't match any sentinel session, the path
+    index lets us fall back to matching by project directory.
+    """
+    by_tty: dict[str, dict[str, Any]] = {}
+    by_path: dict[str, dict[str, Any]] = {}
+    for item in snapshot.get("sessions", []):
+        tty = str(item.get("tty") or "")
+        if tty:
+            by_tty[tty] = item
+        cwd = item.get("cwd")
+        if cwd and item.get("kind") == "ai":
+            norm = os.path.normpath(cwd)
+            # First match wins (sessions are sorted by status priority)
+            if norm not in by_path:
+                by_path[norm] = item
+    return by_tty, by_path
+
+
+def _resolve_monitor(
+    tty_short: str,
+    pane_path: str,
+    by_tty: dict[str, dict[str, Any]],
+    by_path: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Find the best sentinel session for a pane: TTY match first, then path."""
+    monitor = by_tty.get(tty_short)
+    if monitor and monitor.get("agent"):
+        return monitor
+    # Fallback: match Ghostty AI session by project directory
+    if pane_path:
+        norm = os.path.normpath(pane_path)
+        path_match = by_path.get(norm)
+        if path_match:
+            return path_match
+    return monitor or {}
+
+
 def capture_pane_text(pane_id: str, lines: int) -> str:
     code, out, _ = tmux(["capture-pane", "-p", "-t", pane_id, "-S", f"-{max(5, lines)}"], timeout=8)
     if code != 0:
@@ -594,14 +682,14 @@ def pane_health_level(
 def style_for_level(level: str) -> tuple[str, str]:
     """Return (inactive_border_style, active_border_style) for a health level.
 
-    Health is encoded via border color (hue). Active pane gets a bright white
-    border so it's unmistakably distinct regardless of health color.
+    Health is encoded via border color (hue). Active pane gets warm gold
+    border — lit up like it's near the campfire.
     """
     if level == "red":
-        return "fg=colour88", "fg=colour255,bold"
+        return "fg=colour88", "fg=colour214,bold"
     if level == "yellow":
-        return "fg=colour136", "fg=colour255,bold"
-    return "fg=colour22", "fg=colour255,bold"
+        return "fg=colour130", "fg=colour214,bold"
+    return "fg=colour22", "fg=colour214,bold"
 
 
 def set_window_orchestrator_format(session: str) -> None:
@@ -615,26 +703,30 @@ def set_window_orchestrator_format(session: str) -> None:
     tmux(["set-option", "-w", "-t", target, "pane-border-indicators", "both"], timeout=5)
     tmux(["set-option", "-w", "-t", target, "window-style", "fg=colour245,bg=colour234"], timeout=5)
     tmux(["set-option", "-w", "-t", target, "window-active-style", "fg=default,bg=default"], timeout=5)
-    # Border format: active marker (▶) + health symbol (● ⚑ ✖) + project info
+    # Border format: active marker (▶) + health dot + project + ranch status
     fmt = (
-        "#{?pane_active,#[fg=colour255 bold]▶ ,  }"
-        "#{?#{==:#{@health},RED},#[fg=colour196]✖ ,"
-        "#{?#{==:#{@health},YELLOW},#[fg=colour220]⚑ ,"
+        "#{?pane_active,#[fg=colour214 bold]▶ ,  }"
+        "#{?#{==:#{@health},RED},#[fg=colour196]● ,"
+        "#{?#{==:#{@health},YELLOW},#[fg=colour220]● ,"
         "#[fg=colour34]● }}"
         "#[fg=colour250]#{@project_id}"
-        "#{?@health_reason, #[fg=colour246](#{@health_reason}),}"
+        " #[fg=colour240]· "
+        "#{?#{==:#{@health},RED},#[fg=colour196]down#{?@health_reason,: #{@health_reason},},"
+        "#{?#{==:#{@health},YELLOW},#[fg=colour220]at fence#{?@health_reason, #{@health_reason},},"
+        "#[fg=colour34]grazing}}"
         "#[default]"
     )
     tmux(["set-option", "-w", "-t", target, "pane-border-format", fmt], timeout=5)
-    # Status bar: left shows session name, right shows zoom + time
+    # Status bar: ranch-branded left + herd tally right
     tmux(["set-option", "-t", session, "status-style", "bg=colour235,fg=colour250"], timeout=5)
     tmux(["set-option", "-t", session, "status-left",
-          " #[fg=colour39 bold]AW#[default] #[fg=colour130]#{session_name}#[default] "], timeout=5)
+          " #[fg=colour130 bold]AW#[default] #[fg=colour172]⟨#[default] "
+          "#[fg=colour250]#{session_name}#[default] #[fg=colour172]⟩#[default] "], timeout=5)
     tmux(["set-option", "-t", session, "status-left-length", "30"], timeout=5)
     tmux(["set-option", "-t", session, "status-right",
-          "#{?window_zoomed_flag,#[fg=colour214 bold] ZOOM #[default],} "
+          "#{?window_zoomed_flag,#[fg=colour208 bold] ◎ ZOOMED #[default],} "
           "#[fg=colour250]%H:%M#[default] "], timeout=5)
-    tmux(["set-option", "-t", session, "status-right-length", "30"], timeout=5)
+    tmux(["set-option", "-t", session, "status-right-length", "120"], timeout=5)
 
 
 _WINDOW_FORMAT_APPLIED: set[str] = set()
@@ -647,7 +739,8 @@ def refresh_pane_health(
     apply_colors: bool = True,
 ) -> list[dict[str, Any]]:
     panes = list_panes(session)
-    by_tty = session_monitor_by_tty()
+    snapshot, _ = terminal_sentinel.classify_sessions(source_filter="all", include_idle=True)
+    by_tty, by_path = _build_session_indexes(snapshot)
     rows: list[dict[str, Any]] = []
 
     # Window format only needs to be set once per session, not every refresh
@@ -657,7 +750,7 @@ def refresh_pane_health(
 
     for pane in panes:
         tty_short = pane.pane_tty.split("/")[-1]
-        monitor = by_tty.get(tty_short, {})
+        monitor = _resolve_monitor(tty_short, pane.pane_path, by_tty, by_path)
         agent = str(monitor.get("agent") or "-")
         status = str(monitor.get("status") or "idle")
         wait = monitor.get("waiting_minutes")
@@ -717,20 +810,40 @@ def refresh_pane_health(
             }
         )
 
-    # Update status bar with per-project health tabs
+    # Update status bar with ranch-branded herd tally or per-project dots
     if apply_colors and rows:
-        tab_parts = []
+        counts = {"green": 0, "yellow": 0, "red": 0}
         for row in rows:
-            pid = str(row.get("project_id") or "?")
-            lev = str(row.get("health") or "").lower()
-            if len(pid) > 14:
-                pid = pid[:13] + "~"
-            dot_color = {"green": "colour34", "yellow": "colour220", "red": "colour196"}.get(lev, "colour250")
-            tab_parts.append(f"#[fg={dot_color}]●#[fg=colour250] {pid}")
-        tabs_str = " #[fg=colour240]│#[default] ".join(tab_parts)
+            lev = str(row.get("health") or "green").lower()
+            counts[lev] = counts.get(lev, 0) + 1
+        total = sum(counts.values())
+
+        if total > 6:
+            # Compact herd tally for large grids
+            tally_parts = [f"#[fg=colour172]⟨ {total} head"]
+            if counts["green"]:
+                tally_parts.append(f"#[fg=colour34]{counts['green']}●")
+            if counts["yellow"]:
+                tally_parts.append(f"#[fg=colour220]{counts['yellow']}●")
+            if counts["red"]:
+                tally_parts.append(f"#[fg=colour196]{counts['red']}●")
+            tally_parts.append("#[fg=colour172]⟩")
+            tabs_str = " ".join(tally_parts)
+        else:
+            # Per-project dots for small grids
+            tab_parts = []
+            for row in rows:
+                pid = str(row.get("project_id") or "?")
+                lev = str(row.get("health") or "").lower()
+                if len(pid) > 14:
+                    pid = pid[:13] + "~"
+                dot_color = {"green": "colour34", "yellow": "colour220", "red": "colour196"}.get(lev, "colour250")
+                tab_parts.append(f"#[fg={dot_color}]●#[fg=colour250] {pid}")
+            tabs_str = " #[fg=colour240]│#[default] ".join(tab_parts)
+
         status_right = (
             f" {tabs_str} "
-            "#{?window_zoomed_flag,#[fg=colour214 bold] ZOOM #[default],}"
+            "#{?window_zoomed_flag,#[fg=colour208 bold] ◎ ZOOMED #[default],}"
             " #[fg=colour250]%H:%M#[default] "
         )
         tmux(["set-option", "-t", session, "status-right", status_right], timeout=3)
@@ -901,7 +1014,8 @@ def list_hidden_panes(session: str) -> list[dict[str, Any]]:
         return []
 
     hidden: list[dict[str, Any]] = []
-    by_tty = session_monitor_by_tty()
+    snapshot, _ = terminal_sentinel.classify_sessions(source_filter="all", include_idle=True)
+    by_tty, by_path = _build_session_indexes(snapshot)
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) < 5:
@@ -911,7 +1025,7 @@ def list_hidden_panes(session: str) -> list[dict[str, Any]]:
             continue
         project_id = name[len(HIDDEN_PREFIX):]
         tty_short = tty.split("/")[-1]
-        monitor = by_tty.get(tty_short, {})
+        monitor = _resolve_monitor(tty_short, path, by_tty, by_path)
         hidden.append({
             "window_name": name,
             "window_id": window_id,
@@ -931,7 +1045,7 @@ def attach_session(session: str) -> int:
 
 def print_panes(session: str, panes: list[TmuxPane]) -> None:
     snapshot, _ = terminal_sentinel.classify_sessions(source_filter="all", include_idle=True)
-    by_tty = {str(item.get("tty")): item for item in snapshot.get("sessions", [])}
+    by_tty, by_path = _build_session_indexes(snapshot)
 
     print(f"Session: {session}  panes={len(panes)}")
     print(
@@ -940,7 +1054,7 @@ def print_panes(session: str, panes: list[TmuxPane]) -> None:
     )
     for pane in panes:
         tty_short = pane.pane_tty.split("/")[-1]
-        monitor = by_tty.get(tty_short, {})
+        monitor = _resolve_monitor(tty_short, pane.pane_path, by_tty, by_path)
         agent = str(monitor.get("agent") or "-")
         status = str(monitor.get("status") or "-")
         marker = "*" if pane.pane_active else " "
@@ -1508,8 +1622,41 @@ def run_up(args: argparse.Namespace) -> int:
         store["default_projects"] = project_ids
         save_store(store)
 
+        # --- Roundup animation: show each project being wrangled ---
+        skip_anim = os.environ.get("AW_SKIP_ANIM", "").strip() in ("1", "true", "yes")
+        RUST = "\033[38;5;130m"
+        GREEN = "\033[32m"
+        DIM = "\033[2m"
+        RST = "\033[0m"
+
+        print(f"\n  {RUST}Rounding up the herd...{RST}\n")
+
+        for pid in project_ids:
+            if skip_anim:
+                print(f"  {DIM}◦ ─ ─{RST} {GREEN}●{RST} {RUST}{pid:<24}{RST} {GREEN}wrangled ✓{RST}")
+            else:
+                # Lasso animation: rope extends, catches the project
+                sys.stdout.write(f"  {DIM}◦{RST}")
+                sys.stdout.flush()
+                time.sleep(0.08)
+                sys.stdout.write(f" {DIM}─{RST}")
+                sys.stdout.flush()
+                time.sleep(0.06)
+                sys.stdout.write(f" {DIM}─{RST}")
+                sys.stdout.flush()
+                time.sleep(0.06)
+                sys.stdout.write(f" {GREEN}●{RST} {RUST}{pid:<24}{RST}")
+                sys.stdout.flush()
+                time.sleep(0.08)
+                sys.stdout.write(f" {GREEN}wrangled ✓{RST}\n")
+                sys.stdout.flush()
+
+        n = len(project_ids)
+        print(f"\n  {GREEN}✓{RST} All {n} head accounted for. Let's ride.\n")
+        play_sound("Bottle", 0.35)
+
         print(f"Session ready: {session}")
-        print(f"Panes: {len(project_ids)}  Layout: {resolved_layout}")
+        print(f"Panes: {n}  Layout: {resolved_layout}")
 
     if args.nav:
         run_nav(argparse.Namespace(remove=False))
@@ -1562,9 +1709,72 @@ def run_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sparkline(history: list[int]) -> str:
+    """Render a colored health sparkline from history values (0=red, 1=yellow, 2=green)."""
+    bars = "▁▂▃▄▅▆▇█"
+    color_map = {0: "\033[31m", 1: "\033[33m", 2: "\033[32m"}
+    parts = []
+    for val in history[-10:]:
+        val = max(0, min(2, val))
+        bar_idx = [0, 4, 7][val]  # red→▁, yellow→▅, green→█
+        parts.append(f"{color_map[val]}{bars[bar_idx]}")
+    return "".join(parts) + "\033[0m" if parts else ""
+
+
+def _context_bar(pct: int, width: int = 20) -> str:
+    """Render a mini context usage bar: [████░░░░] with threshold coloring."""
+    filled = int(pct * width / 100)
+    empty = width - filled
+    color = "\033[31m" if pct >= 80 else "\033[33m" if pct >= 50 else "\033[32m"
+    return f"{color}{'█' * filled}\033[2m{'░' * empty}\033[0m"
+
+
+def _campfire_header(frame: int, counts: dict[str, int]) -> list[str]:
+    """Render flickering campfire ASCII art header for the ranch board."""
+    # 3 flame frames that subtly vary
+    flames = [
+        ["    )", "   ) \\", "  / ) (", "  \\(_)/"],
+        ["    (", "   ( /", "  \\ ( )", "  /(_)\\"],
+        ["    )", "   / )", "  ( ) \\", "  \\(_)/"],
+    ]
+    flame_colors = [
+        [220, 214, 208, 166],  # bright yellow → burnt orange
+        [214, 208, 166, 172],  # gold → amber
+        [208, 220, 172, 166],  # orange → yellow → amber
+    ]
+    f = frame % 3
+    total = sum(counts.values())
+    lines = []
+    for i, fl in enumerate(flames[f]):
+        fc = flame_colors[f][i]
+        if i == 0:
+            lines.append(f"\033[38;5;{fc}m{fl}\033[0m")
+        elif i == len(flames[f]) - 1:
+            # Last flame line gets the title
+            lines.append(
+                f"\033[38;5;{fc}m{fl}\033[0m    \033[38;5;130m\033[1mRANCH BOARD\033[0m"
+            )
+        else:
+            lines.append(f"\033[38;5;{fc}m{fl}\033[0m")
+    # Log base with herd count
+    g = counts.get("green", 0)
+    y = counts.get("yellow", 0)
+    r = counts.get("red", 0)
+    lines.append(
+        f"\033[38;5;130m  _|__|_\033[0m   "
+        f"{total} head · "
+        f"\033[32m{g}●\033[0m "
+        f"\033[33m{y}●\033[0m "
+        f"\033[31m{r}●\033[0m"
+    )
+    lines.append(f"\033[38;5;130m |      |\033[0m")
+    return lines
+
+
 def run_rail(args: argparse.Namespace) -> int:
-    """Auto-refreshing compact status rail for a narrow tmux split."""
+    """Auto-refreshing ranch board status rail for a narrow tmux split."""
     import time as _time
+    global _campfire_frame
 
     ensure_tmux()
     store = load_store()
@@ -1581,72 +1791,118 @@ def run_rail(args: argparse.Namespace) -> int:
             session=session,
             capture_lines=40,
             wait_attention_min=5,
-
         )
 
         lines: list[str] = []
         lines.append("\033[2J\033[H")  # clear screen
-        lines.append("\033[1;36m STATUS RAIL\033[0m")
-        lines.append("\033[2m" + "─" * 30 + "\033[0m")
 
-        counts = {"green": 0, "yellow": 0, "red": 0, "total": 0}
+        # --- Campfire header with herd count ---
+        counts: dict[str, int] = {"green": 0, "yellow": 0, "red": 0}
         waiting = 0
         total_cost = 0.0
         total_tokens_k = 0
         claude_count = 0
+
         for row in rows:
-            counts["total"] += 1
             health = str(row.get("health") or "green")
             counts[health] = counts.get(health, 0) + 1
-            status = str(row.get("status") or "idle")
-            if status == "waiting":
+            if str(row.get("status") or "idle") == "waiting":
                 waiting += 1
 
-            dot_color = {"green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m"}.get(health, "\033[0m")
-            agent = str(row.get("agent") or row.get("ai_tool") or "")
+        _campfire_frame += 1
+        lines.extend(_campfire_header(_campfire_frame, counts))
+        lines.append("\033[2m" + "─" * 34 + "\033[0m")
+
+        # --- Ranch Status summary box ---
+        total = sum(counts.values())
+        g, y, r = counts.get("green", 0), counts.get("yellow", 0), counts.get("red", 0)
+        ranch_terms = []
+        if g:
+            ranch_terms.append(f"\033[32m{g} grazing\033[0m")
+        if y:
+            ranch_terms.append(f"\033[33m{y} at fence\033[0m")
+        if r:
+            ranch_terms.append(f"\033[31m{r} down\033[0m")
+        lines.append(f" {' · '.join(ranch_terms)}")
+        lines.append("\033[2m" + "─" * 34 + "\033[0m")
+
+        # --- Per-pane entries with sparklines ---
+        health_val = {"green": 2, "yellow": 1, "red": 0}
+        for row in rows:
+            health = str(row.get("health") or "green")
             project = str(row.get("project_id") or row.get("pane_title") or "?")
+            agent = str(row.get("agent") or row.get("ai_tool") or "")
+            status = str(row.get("status") or "idle")
             if len(project) > 16:
                 project = project[:15] + "~"
-            agent_label = f"  {agent}" if agent else ""
-            status_label = status if status != "idle" else ""
 
-            line = f" {dot_color}●\033[0m {project:<16}{agent_label}"
-            if status_label:
-                line += f"  \033[2m{status_label}\033[0m"
+            # Update health history
+            h_val = health_val.get(health, 2)
+            hist = _health_history.setdefault(project, [])
+            hist.append(h_val)
+            if len(hist) > 10:
+                _health_history[project] = hist[-10:]
 
-            # Append Claude Code stats when available
+            # Check for state change sparkle
+            prev = _prev_rail_health.get(project)
+            if prev and prev != health:
+                _sparkle_countdown[project] = 2
+                # Play sound on health transitions
+                if health == "red":
+                    play_sound("Basso", 0.4, key=f"red-{project}")
+                elif health == "green" and prev == "red":
+                    play_sound("Bottle", 0.3, key=f"green-{project}")
+            _prev_rail_health[project] = health
+
+            sparkle = ""
+            if _sparkle_countdown.get(project, 0) > 0:
+                sparkle = " \033[38;5;220m✦\033[0m"
+                _sparkle_countdown[project] -= 1
+
+            dot_color = {"green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m"}.get(health, "\033[0m")
+            spark = _sparkline(_health_history.get(project, []))
+
+            line = f" {dot_color}●\033[0m{sparkle} {project:<16}"
+            if agent and agent != "-":
+                line += f" \033[2m{agent:<8}\033[0m"
+
+            lines.append(line)
+
+            # Sparkline on its own line (compact, below the pane entry)
+            if len(_health_history.get(project, [])) > 1:
+                lines.append(f"   {spark}")
+
+            # Claude Code stats with context bar
             cc = row.get("cc_stats")
             if cc:
                 claude_count += 1
                 ctx = cc.get("context_pct")
                 cost = cc.get("cost")
+
                 if ctx is not None:
-                    ctx_color = "\033[31m" if ctx >= 80 else "\033[33m" if ctx >= 50 else "\033[32m"
-                    line += f"  {ctx_color}{ctx}%\033[0m"
+                    bar = _context_bar(ctx)
+                    lines.append(f"   ctx {bar} {ctx}%")
+
                 if cost is not None:
-                    line += f"  \033[2m${cost:.2f}\033[0m"
+                    # Flash gold when cost increases
+                    prev_cost = _prev_rail_costs.get(project, 0.0)
+                    cost_color = "\033[38;5;214m" if cost > prev_cost else "\033[2m"
+                    _prev_rail_costs[project] = cost
+                    lines.append(f"   {cost_color}${cost:.2f}\033[0m")
                     total_cost += cost
                 total_tokens_k += cc.get("tokens_k", 0)
 
-            lines.append(line)
-
-        lines.append("\033[2m" + "─" * 30 + "\033[0m")
-        lines.append(f" {counts['total']} panes  {waiting} waiting")
-        lines.append(
-            f" \033[32m{counts['green']}g\033[0m "
-            f"\033[33m{counts['yellow']}y\033[0m "
-            f"\033[31m{counts['red']}r\033[0m"
-        )
+        # --- Totals ---
+        lines.append("\033[2m" + "─" * 34 + "\033[0m")
         if claude_count > 0:
             lines.append(
                 f" \033[36m{claude_count} claude\033[0m  "
                 f"\033[2m{total_tokens_k}k tok  ${total_cost:.2f}\033[0m"
             )
 
-        # Show hidden panes
+        # --- Hidden panes ---
         hidden = list_hidden_panes(session)
         if hidden:
-            lines.append("\033[2m" + "─" * 30 + "\033[0m")
             lines.append(f" \033[2m{len(hidden)} hidden\033[0m")
             for h in hidden:
                 hp = str(h.get("project_id") or "?")
@@ -1656,6 +1912,10 @@ def run_rail(args: argparse.Namespace) -> int:
                 hs = str(h.get("status") or "")
                 agent_label = f"  {ha}" if ha and ha != "-" else ""
                 lines.append(f" \033[2m○ {hp:<16}{agent_label}  {hs}\033[0m")
+
+        # --- Last roundup timestamp ---
+        now_str = datetime.now().strftime("%H:%M:%S")
+        lines.append(f"\n\033[2m  last roundup: {now_str}\033[0m")
 
         print("\n".join(lines), flush=True)
 
@@ -2056,11 +2316,12 @@ def run_persistence_save(args: argparse.Namespace) -> int:
 
     proj_map = project_map()
     panes = backfill_pane_project_ids(session, list_panes(session), proj_map)
-    by_tty = session_monitor_by_tty()
+    snapshot, _ = terminal_sentinel.classify_sessions(source_filter="all", include_idle=True)
+    by_tty, by_path = _build_session_indexes(snapshot)
     pane_rows: list[dict[str, Any]] = []
     for pane in panes:
         tty_short = pane.pane_tty.split("/")[-1]
-        monitor = by_tty.get(tty_short, {})
+        monitor = _resolve_monitor(tty_short, pane.pane_path, by_tty, by_path)
         pane_rows.append(
             {
                 "index": pane.pane_index,
@@ -2377,8 +2638,8 @@ def _build_context_menu_cmd(session: str) -> list[str]:
     aw = str(ROOT / "scripts" / "agent-wrangler")
     aw_py = str(ROOT / "scripts" / "agent_wrangler.py")
     menu_items: list[tuple[str, str, str]] = [
-        ("Zoom", "z", "resize-pane -Z"),
-        ("View Output", "o",
+        ("Zoom In", "z", "resize-pane -Z"),
+        ("Check Output", "o",
          f"display-popup -E -w 80 -h 30 "
          f"'python3 {aw_py} teams summary "
          f"#{{pane_title}} --session {session} --lines 50; read'"),
@@ -2386,15 +2647,15 @@ def _build_context_menu_cmd(session: str) -> list[str]:
          f"command-prompt -p 'command:' "
          f"\"run-shell '{aw} send #{{pane_title}} --command \\\"%%\\\"'\""),
         ("", "", ""),
-        ("Start Claude", "1", f"run-shell '{aw} agent #{{pane_title}} claude'"),
-        ("Start Codex", "2", f"run-shell '{aw} agent #{{pane_title}} codex'"),
-        ("Start Aider", "3", f"run-shell '{aw} agent #{{pane_title}} aider'"),
+        ("Saddle Up Claude", "1", f"run-shell '{aw} agent #{{pane_title}} claude'"),
+        ("Saddle Up Codex", "2", f"run-shell '{aw} agent #{{pane_title}} codex'"),
+        ("Saddle Up Aider", "3", f"run-shell '{aw} agent #{{pane_title}} aider'"),
         ("", "", ""),
-        ("Restart", "r", f"run-shell '{aw} restart #{{pane_title}}'"),
-        ("Stop (Ctrl-C)", "s", f"run-shell '{aw} stop #{{pane_title}}'"),
-        ("Kill", "k", f"run-shell '{aw} kill #{{pane_title}}'"),
+        ("Round Up Again", "r", f"run-shell '{aw} restart #{{pane_title}}'"),
+        ("Whoa (Ctrl-C)", "s", f"run-shell '{aw} stop #{{pane_title}}'"),
+        ("Put Down", "k", f"run-shell '{aw} kill #{{pane_title}}'"),
     ]
-    args_list = ["display-menu", "-T", "#[bold]#{pane_title}", "-x", "R", "-y", "S"]
+    args_list = ["display-menu", "-T", "#[bold]⟨ #{pane_title} ⟩", "-x", "R", "-y", "S"]
     for label, key, cmd in menu_items:
         if not label:
             args_list.append("")
@@ -2533,6 +2794,7 @@ def run_agent(args: argparse.Namespace) -> int:
     tokens.extend(extra)
     command = " ".join(token for token in tokens if token)
     pane_send(pane.pane_id, command, enter=True)
+    play_sound("Morse", 0.3, key=f"agent-{pane.pane_id}")
     print(f"launched agent in {pane.pane_id} ({pane.pane_title}): {command}")
     return 0
 
@@ -2592,6 +2854,7 @@ def run_exit(args: argparse.Namespace) -> int:
     for idx in range(1, 10):
         tmux(["unbind-key", "-n", f"M-{idx}"], timeout=3)
 
+    play_sound("Submarine", 0.3)
     code, _, err = tmux(["kill-session", "-t", session], timeout=5)
     if code != 0:
         raise ValueError(err.strip() or f"failed to kill session {session}")
@@ -3018,28 +3281,56 @@ def _run_ops_command(command: list[str]) -> int:
 
 
 def run_ops(_: argparse.Namespace) -> int:
-    """Interactive operator console — numbered menu for common actions."""
+    """Interactive operator console — ranch operations board."""
+    RUST = "\033[38;5;130m"
+    AMBER = "\033[38;5;208m"
+    DIM = "\033[2m"
+    RESET = "\033[0m"
+
     actions: list[tuple[str, list[str]]] = [
-        ("Start all (import + grid + manager + nav)", ["start"]),
+        ("Start all (import + grid + manager)", ["start"]),
         ("Attach grid session", ["attach"]),
-        ("Show pane status", ["status"]),
-        ("Focus pane by project/token", ["__focus__"]),
+        ("Show herd status", ["status"]),
+        ("Focus pane by name", ["__focus__"]),
         ("Send command to pane", ["__send__"]),
-        ("Launch agent in pane", ["__agent__"]),
-        ("Stop pane (Ctrl-C)", ["__stop__"]),
+        ("Saddle up agent", ["__agent__"]),
+        ("Whoa (stop pane)", ["__stop__"]),
         ("Open manager window", ["manager", "--replace"]),
-        ("Doctor (attention)", ["doctor", "--only-attention"]),
+        ("Doctor (check attention)", ["doctor", "--only-attention"]),
     ]
 
-    print("Agent Wrangler Ops Console")
-    print("Enter number, or q to quit.\n")
+    # Ranch operations header
+    print(f"{DIM}╭─ Ranch Operations ──────────────────╮{RESET}")
+    print(f"{DIM}│{RESET}     {RUST}/\\{RESET}                              {DIM}│{RESET}")
+    print(f"{DIM}│{RESET}    {RUST}/  \\{RESET}   Agent Wrangler            {DIM}│{RESET}")
+    print(f"{DIM}│{RESET}   {RUST}/    \\{RESET}  Enter number, or q to quit{DIM}│{RESET}")
+    print(f"{DIM}│{RESET}  {RUST}'──────'{RESET}                           {DIM}│{RESET}")
+    print(f"{DIM}╰─────────────────────────────────────╯{RESET}")
+    print()
+
+    # Try to show quick health summary
+    try:
+        store = load_store()
+        session = store.get("default_session") or DEFAULT_SESSION
+        if session_exists(session):
+            rows = refresh_pane_health(session, capture_lines=40, wait_attention_min=5, apply_colors=False)
+            dot_map = {"green": "\033[32m●", "yellow": "\033[33m●", "red": "\033[31m●"}
+            herd_line = "  Herd: "
+            for row in rows:
+                pid = str(row.get("project_id") or "?")
+                lev = str(row.get("health") or "green")
+                herd_line += f" {dot_map.get(lev, '●')}{RESET} {pid}"
+            print(herd_line + RESET)
+            print()
+    except Exception:
+        pass
 
     while True:
         for idx, (label, _) in enumerate(actions, start=1):
-            print(f"{idx:>2}. {label}")
-        print(" q. Quit")
+            print(f"  {RUST}{idx:>2}.{RESET} {label}")
+        print(f"   {DIM}q. Quit{RESET}")
 
-        choice = input("\nops> ").strip().lower()
+        choice = input(f"\n{AMBER}ranch>{RESET} ").strip().lower()
         if choice in {"q", "quit", "exit"}:
             return 0
         if not choice or not choice.isdigit():

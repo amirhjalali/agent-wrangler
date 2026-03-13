@@ -21,6 +21,35 @@ STATE_DIR = ROOT / ".state"
 STATE_FILE = STATE_DIR / "terminal-sentinel-state.json"
 REPORTS_DIR = ROOT / "reports"
 
+def _tty_mtime(tty: str) -> float | None:
+    """Return modification time of a TTY device, or None if inaccessible.
+
+    When a process writes to its terminal, the device mtime advances.
+    A frozen mtime means no output — the process is idle / waiting for input.
+    """
+    try:
+        return os.stat(f"/dev/{tty}").st_mtime
+    except OSError:
+        return None
+
+
+def _process_cwd(pid: int) -> str | None:
+    """Resolve cwd for a process via lsof."""
+    if pid <= 0:
+        return None
+    try:
+        proc = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        for line in proc.stdout.splitlines():
+            if line.startswith("n/"):
+                return line[1:].strip()
+    except Exception:
+        pass
+    return None
+
+
 WRAPPER_BINS = {
     "login",
     "zsh",
@@ -325,25 +354,23 @@ def classify_sessions(
                 and prev.get("command") == primary.command
             )
 
-            delta_cpu = None
-            if same_proc:
-                try:
-                    delta_cpu = primary.cpu_seconds - float(prev.get("cpu_seconds", 0.0))
-                except Exception:
-                    delta_cpu = None
-
-            is_active = (
-                primary.pcpu >= 3.0
-                or primary.stat.startswith("R")
-                or (delta_cpu is not None and delta_cpu >= 2.0)
+            # Primary signal: TTY device mtime. When the AI tool writes
+            # output (streaming, tool results, etc.), the device mtime
+            # advances. A frozen mtime means it's sitting at its prompt.
+            # This is far more reliable than CPU for remote-thinking tools.
+            tty_mt = _tty_mtime(tty)
+            prev_mt = prev.get("tty_mtime") if isinstance(prev, dict) else None
+            tty_changed = (
+                tty_mt is not None
+                and prev_mt is not None
+                and tty_mt != prev_mt
             )
 
-            # Hysteresis: if previously waiting, require stronger signal to flip back.
-            # This prevents flapping from minor CPU blips (cursor, status bar).
-            was_waiting = same_proc and prev.get("waiting_since") is not None
-            if was_waiting and not primary.stat.startswith("R"):
-                # Need higher CPU to break out of waiting state
-                is_active = primary.pcpu >= 5.0 or (delta_cpu is not None and delta_cpu >= 3.0)
+            is_active = tty_changed or primary.stat.startswith("R")
+
+            # First observation (no previous mtime) — fall back to CPU.
+            if tty_mt is not None and prev_mt is None:
+                is_active = primary.pcpu >= 1.0
 
             if is_active:
                 status = "active"
@@ -359,6 +386,7 @@ def classify_sessions(
                 "command": primary.command,
                 "agent": agent,
                 "cpu_seconds": primary.cpu_seconds,
+                "tty_mtime": tty_mt,
                 "waiting_since": waiting_since,
                 "last_seen": now_iso(),
             }
@@ -379,6 +407,9 @@ def classify_sessions(
         if not include_idle and status == "idle":
             continue
 
+        # Resolve cwd for AI sessions (needed for path-based matching)
+        cwd = _process_cwd(primary.pid) if kind == "ai" else None
+
         sessions.append(
             {
                 "tty": tty,
@@ -392,6 +423,7 @@ def classify_sessions(
                 "runtime": fmt_seconds(primary.cpu_seconds),
                 "waiting_minutes": round(waiting_minutes, 1) if waiting_minutes is not None else None,
                 "command": primary.command,
+                "cwd": cwd,
             }
         )
 
