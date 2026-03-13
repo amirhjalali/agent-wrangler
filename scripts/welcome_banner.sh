@@ -58,6 +58,7 @@ OLD_STTY=""
 cleanup() {
     printf '\033[?25h\033[0m'  # show cursor, reset colors
     [[ -n "$OLD_STTY" ]] && stty "$OLD_STTY" 2>/dev/null
+    return 0
 }
 trap cleanup EXIT INT TERM
 
