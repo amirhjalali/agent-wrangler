@@ -74,6 +74,7 @@ def play_sound(name: str, volume: float = 0.5, key: str = "") -> None:
         try:
             subprocess.Popen(
                 ["afplay", "-v", str(volume), str(path)],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -1039,6 +1040,16 @@ def list_hidden_panes(session: str) -> list[dict[str, Any]]:
 
 
 def attach_session(session: str) -> int:
+    if not sys.stdout.isatty():
+        # Not a terminal (e.g. subprocess call) — skip attach silently
+        return 0
+    if os.environ.get("TMUX"):
+        # Already inside tmux — switch to the target session instead of attaching
+        proc = subprocess.run(
+            ["tmux", "switch-client", "-t", session],
+            stdin=subprocess.DEVNULL, check=False,
+        )
+        return int(proc.returncode)
     proc = subprocess.run(["tmux", "attach-session", "-t", session], check=False)
     return int(proc.returncode)
 
@@ -2077,7 +2088,8 @@ def run_manager(args: argparse.Namespace) -> int:
             timeout=8,
         )
         if code != 0:
-            raise ValueError(err.strip() or f"failed to create manager window '{window}'")
+            print(f"Warning: failed to create manager window '{window}': {err.strip()}")
+            return 1
 
         # Split right pane for status rail (~25% width)
         rail_script = ROOT / "scripts" / "agent_wrangler.py"
@@ -3276,7 +3288,7 @@ def _run_ops_command(command: list[str]) -> int:
     cmd = [str(ROOT / "scripts" / "agent-wrangler"), *command]
     print("")
     print("$ " + " ".join(cmd))
-    proc = subprocess.run(cmd, check=False)
+    proc = subprocess.run(cmd, check=False, timeout=120)
     return int(proc.returncode)
 
 
