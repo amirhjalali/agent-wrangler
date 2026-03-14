@@ -20,6 +20,7 @@ from typing import Any
 import terminal_sentinel
 
 ROOT = Path(__file__).resolve().parents[1]
+SELF_PATH = str(ROOT)  # Agent-wrangler's own repo — the cowboy, not a horse
 CONFIG_PATH = ROOT / "config" / "team_grid.json"
 PERSISTENCE_DIR = ROOT / ".state" / "persistence"
 
@@ -307,6 +308,8 @@ def choose_projects(
 
     selected: list[str] = []
     for project in load_projects_config().get("projects", []):
+        if project.get("barn"):
+            continue  # In the barn — skip unless explicitly requested
         if group and str(project.get("group", "")).lower() != group.lower():
             continue
         selected.append(project["id"])
@@ -491,7 +494,12 @@ def _resolve_monitor(
     by_tty: dict[str, dict[str, Any]],
     by_path: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Find the best sentinel session for a pane: TTY match first, then path."""
+    """Find the best sentinel session for a pane: TTY match first, then path.
+
+    Path fallback matches Ghostty AI sessions by directory. When a match comes
+    from path (not TTY), it's flagged as 'path_match' so health detection knows
+    to trust the sentinel's status instead of scanning the tmux pane scrollback.
+    """
     monitor = by_tty.get(tty_short)
     if monitor and monitor.get("agent"):
         return monitor
@@ -500,7 +508,9 @@ def _resolve_monitor(
         norm = os.path.normpath(pane_path)
         path_match = by_path.get(norm)
         if path_match:
-            return path_match
+            result = dict(path_match)
+            result["path_match"] = True
+            return result
     return monitor or {}
 
 
@@ -634,10 +644,7 @@ def detect_prompt_waiting(raw_text: str, agent: str) -> bool:
         # Claude Code prompt: ❯ or > at the start of a line (possibly with spaces)
         if agent == "claude" and stripped in ("❯", ">", "❯ "):
             return True
-        # Aider prompt
-        if agent == "aider" and (stripped.endswith("aider>") or stripped == ">"):
-            return True
-        # Codex / Gemini prompt
+        # Codex / Gemini CLI prompt
         if agent in ("codex", "gemini") and stripped in (">", "❯"):
             return True
         # If we hit a non-status, non-separator, non-prompt line, it's output
@@ -654,29 +661,36 @@ def pane_health_level(
     status = str(monitor.get("status") or "idle")
     agent = str(monitor.get("agent") or "")
     wait = monitor.get("waiting_minutes")
+    is_path_match = bool(monitor.get("path_match"))
 
     if error_marker:
         return "red", True, f"error: {error_marker}"
 
-    # Scrollback-based detection overrides CPU-based sentinel status.
-    # AI tools do their thinking on remote servers, so local CPU is
-    # near-zero even during active generation. The prompt character
-    # in the pane text is the reliable signal.
     if agent and agent != "-":
-        if prompt_waiting:
-            # Agent is at its input prompt — waiting for user
-            if wait is not None and float(wait) >= float(wait_attention_min):
-                mins = int(wait)
-                return "red", True, f"waiting {mins}m"
-            return "yellow", False, ""
+        if is_path_match:
+            # Agent matched by directory (e.g. Ghostty running Claude for this
+            # project). Trust the sentinel's status — the tmux pane scrollback
+            # belongs to a shell, not the agent.
+            if status == "active":
+                return "green", False, ""
+            if status == "waiting":
+                return "yellow", False, ""
+            return "yellow", False, status
         else:
-            # No prompt visible — agent is generating or executing
-            return "green", False, ""
+            # Agent matched by TTY — it's running in this pane directly.
+            # Use scrollback-based detection: prompt visible = waiting,
+            # no prompt = generating (CPU-based detection doesn't work
+            # because AI tools think on remote servers).
+            if prompt_waiting:
+                return "yellow", False, ""
+            else:
+                return "green", False, ""
 
     if status == "background":
         return "yellow", False, "background"
+    # No agent running — pane is idle at a shell prompt
     if status in {"active", "idle"}:
-        return "green", False, status
+        return "yellow", False, "no agent"
     return "yellow", False, status
 
 
@@ -1336,6 +1350,10 @@ def ghostty_import_plan(
             continue
 
         project_id, cwd = infer_project_id_from_session(session, proj_map)
+
+        # Agent-wrangler is the cowboy, not a horse — never add self to grid
+        if cwd and Path(cwd).resolve() == Path(SELF_PATH).resolve():
+            continue
         if not project_id:
             unmatched.append(
                 {
@@ -1371,7 +1389,7 @@ def ghostty_import_plan(
                 project_ids.append(project_id)
 
         agent = str(session.get("agent") or "").strip().lower()
-        if agent in {"claude", "codex", "aider", "gemini"} and mapped_project_id not in agent_by_project:
+        if agent in {"claude", "codex", "gemini"} and mapped_project_id not in agent_by_project:
             agent_by_project[mapped_project_id] = agent
 
         mapped.append(
@@ -1405,6 +1423,9 @@ def _auto_register_projects(
         override = project_overrides.get(pid, {})
         path = str(override.get("path") or "")
         if not path:
+            continue
+        # Agent-wrangler is the cowboy, not a horse
+        if Path(path).resolve() == Path(SELF_PATH).resolve():
             continue
         new_projects.append({
             "id": base_id,
@@ -1496,7 +1517,12 @@ def run_import(args: argparse.Namespace) -> int:
         preserve_duplicates=args.preserve_duplicates,
     )
     if not project_ids:
-        raise ValueError("No active Ghostty terminals found.")
+        project_ids = choose_projects(None, limit=args.max_panes, group=None)
+        agent_by_project = {}
+        project_overrides = {}
+        mapped = []
+        unmatched = []
+        print("No Ghostty terminals detected — starting from projects.json.")
 
     # Auto-register discovered terminals into projects.json
     _auto_register_projects(project_ids, project_overrides, proj_map)
@@ -1605,13 +1631,13 @@ def run_up(args: argparse.Namespace) -> int:
             agent_by_project = detected_agents if run_agents else None
 
             if not project_ids:
+                project_ids = choose_projects(args.projects, limit=args.max_panes, group=args.group)
+                agent_by_project = None
+                project_overrides = None
                 if args.projects or args.group:
-                    project_ids = choose_projects(args.projects, limit=args.max_panes, group=args.group)
-                    agent_by_project = None
-                    project_overrides = None
                     print("No Ghostty matches found; using configured project selection fallback.")
                 else:
-                    raise ValueError("No active Ghostty terminals found.")
+                    print("No Ghostty terminals detected — starting from projects.json.")
             else:
                 _auto_register_projects(project_ids, project_overrides, proj_map)
                 print(f"Ghostty mapping: matched={len(mapped)} unmatched={len(unmatched)}")
@@ -1741,44 +1767,29 @@ def _context_bar(pct: int, width: int = 20) -> str:
 
 
 def _campfire_header(frame: int, counts: dict[str, int]) -> list[str]:
-    """Render flickering campfire ASCII art header for the ranch board."""
-    # 3 flame frames that subtly vary
-    flames = [
-        ["    )", "   ) \\", "  / ) (", "  \\(_)/"],
-        ["    (", "   ( /", "  \\ ( )", "  /(_)\\"],
-        ["    )", "   / )", "  ( ) \\", "  \\(_)/"],
-    ]
-    flame_colors = [
-        [220, 214, 208, 166],  # bright yellow → burnt orange
-        [214, 208, 166, 172],  # gold → amber
-        [208, 220, 172, 166],  # orange → yellow → amber
-    ]
-    f = frame % 3
+    """Render ranch board header with cowboy hat."""
     total = sum(counts.values())
-    lines = []
-    for i, fl in enumerate(flames[f]):
-        fc = flame_colors[f][i]
-        if i == 0:
-            lines.append(f"\033[38;5;{fc}m{fl}\033[0m")
-        elif i == len(flames[f]) - 1:
-            # Last flame line gets the title
-            lines.append(
-                f"\033[38;5;{fc}m{fl}\033[0m    \033[38;5;130m\033[1mRANCH BOARD\033[0m"
-            )
-        else:
-            lines.append(f"\033[38;5;{fc}m{fl}\033[0m")
-    # Log base with herd count
     g = counts.get("green", 0)
     y = counts.get("yellow", 0)
     r = counts.get("red", 0)
-    lines.append(
-        f"\033[38;5;130m  _|__|_\033[0m   "
-        f"{total} head · "
-        f"\033[32m{g}●\033[0m "
-        f"\033[33m{y}●\033[0m "
-        f"\033[31m{r}●\033[0m"
-    )
-    lines.append(f"\033[38;5;130m |      |\033[0m")
+
+    hat_color = 172  # amber
+    lines = [
+        f"\033[38;5;{hat_color}m      .~~~~`\\~~\\\033[0m",
+        f"\033[38;5;{hat_color}m     ;       ~~ \\\033[0m",
+        f"\033[38;5;{hat_color}m     |           ;\033[0m",
+        f"\033[38;5;{hat_color}m ,--------,______|---.\033[0m",
+        f"\033[38;5;{hat_color}m/          \\-----`    \\\033[0m",
+        f"\033[38;5;{hat_color}m`.__________`-_______-'\033[0m",
+        "",
+        f" \033[38;5;130m\033[1mRANCH BOARD\033[0m",
+        (
+            f" {total} head · "
+            f"\033[32m{g}●\033[0m "
+            f"\033[33m{y}●\033[0m "
+            f"\033[31m{r}●\033[0m"
+        ),
+    ]
     return lines
 
 
@@ -1923,6 +1934,11 @@ def run_rail(args: argparse.Namespace) -> int:
                 hs = str(h.get("status") or "")
                 agent_label = f"  {ha}" if ha and ha != "-" else ""
                 lines.append(f" \033[2m○ {hp:<16}{agent_label}  {hs}\033[0m")
+
+        # --- Barn count ---
+        barn_projects = [p for p in load_projects_config().get("projects", []) if p.get("barn")]
+        if barn_projects:
+            lines.append(f" \033[38;5;130m{len(barn_projects)} in barn\033[0m")
 
         # --- Last roundup timestamp ---
         now_str = datetime.now().strftime("%H:%M:%S")
@@ -2435,7 +2451,7 @@ def run_persistence_restore(args: argparse.Namespace) -> int:
         project_ids.append(project_id)
 
         agent = str(pane.get("agent") or "").strip().lower()
-        if agent in {"claude", "codex", "aider", "gemini"}:
+        if agent in {"claude", "codex", "gemini"}:
             agent_by_project[project_id] = agent
 
     if not project_ids:
@@ -2549,7 +2565,7 @@ def doctor_fix_for_row(row: dict[str, Any]) -> str:
     if missing_command:
         if missing_command == "code":
             return "Use `codex` for OpenAI Codex CLI, or install VS Code shell command `code`."
-        if missing_command in {"claude", "codex", "aider", "gemini"} and not shutil.which(missing_command):
+        if missing_command in {"claude", "codex", "gemini"} and not shutil.which(missing_command):
             return f"Install `{missing_command}` and ensure it is on PATH."
         if missing_command == "pnpm" and not shutil.which("pnpm"):
             return "Install pnpm (`brew install pnpm`) or update startup_command to npm/bun."
@@ -2576,7 +2592,7 @@ def run_doctor(args: argparse.Namespace) -> int:
 
     print("Agent Wrangler Doctor")
     print("Tool availability:")
-    for tool in ["claude", "codex", "aider", "gemini", "npm", "pnpm", "bun"]:
+    for tool in ["claude", "codex", "gemini", "npm", "pnpm", "bun"]:
         ok = "yes" if shutil.which(tool) else "no"
         print(f"- {tool:<7} installed={ok}")
 
@@ -2649,23 +2665,27 @@ def _build_context_menu_cmd(session: str) -> list[str]:
     """Build a tmux display-menu command for right-click pane management."""
     aw = str(ROOT / "scripts" / "agent-wrangler")
     aw_py = str(ROOT / "scripts" / "agent_wrangler.py")
+    # Use pane_id (e.g. %5) — tmux expands #{pane_id} reliably in display-menu
+    # pane_target() resolves pane IDs so all commands work with this
+    pid = "#{pane_id}"
     menu_items: list[tuple[str, str, str]] = [
         ("Zoom In", "z", "resize-pane -Z"),
         ("Check Output", "o",
          f"display-popup -E -w 80 -h 30 "
          f"'python3 {aw_py} teams summary "
-         f"#{{pane_title}} --session {session} --lines 50; read'"),
+         f"{pid} --session {session} --lines 50; read'"),
         ("Send Command...", "c",
          f"command-prompt -p 'command:' "
-         f"\"run-shell '{aw} send #{{pane_title}} --command \\\"%%\\\"'\""),
+         f"\"run-shell '{aw} send {pid} --command \\\"%%\\\"'\""),
         ("", "", ""),
-        ("Saddle Up Claude", "1", f"run-shell '{aw} agent #{{pane_title}} claude'"),
-        ("Saddle Up Codex", "2", f"run-shell '{aw} agent #{{pane_title}} codex'"),
-        ("Saddle Up Aider", "3", f"run-shell '{aw} agent #{{pane_title}} aider'"),
+        ("Start Claude", "1", f"run-shell '{aw} agent {pid} claude'"),
+        ("Start Codex", "2", f"run-shell '{aw} agent {pid} codex'"),
+        ("Start Gemini", "3", f"run-shell '{aw} agent {pid} gemini'"),
         ("", "", ""),
-        ("Round Up Again", "r", f"run-shell '{aw} restart #{{pane_title}}'"),
-        ("Whoa (Ctrl-C)", "s", f"run-shell '{aw} stop #{{pane_title}}'"),
-        ("Put Down", "k", f"run-shell '{aw} kill #{{pane_title}}'"),
+        ("Restart", "r", f"run-shell '{aw} restart {pid}'"),
+        ("Stop (Ctrl-C)", "s", f"run-shell '{aw} stop {pid}'"),
+        ("", "", ""),
+        ("Send to Barn", "b", f"run-shell '{aw} barn {pid}'"),
     ]
     args_list = ["display-menu", "-T", "#[bold]⟨ #{pane_title} ⟩", "-x", "R", "-y", "S"]
     for label, key, cmd in menu_items:
@@ -3211,6 +3231,10 @@ def run_add(args: argparse.Namespace) -> int:
     path = Path(args.path).resolve() if args.path else Path.cwd()
     if not path.is_dir():
         raise ValueError(f"Not a directory: {path}")
+    # Agent-wrangler is the cowboy, not a horse
+    if path == Path(SELF_PATH).resolve():
+        print("Agent Wrangler is the cowboy, not a horse. It manages the grid from the manager window.")
+        return 1
 
     proj_id = args.name or path.name.replace(" ", "-").lower()
 
@@ -3251,6 +3275,157 @@ def run_add(args: argparse.Namespace) -> int:
         print(f"Added pane for '{proj_id}' to session '{session}'")
     else:
         print(f"Session '{session}' not running. Pane will appear on next start.")
+
+    return 0
+
+
+def run_remove(args: argparse.Namespace) -> int:
+    """Remove a project from config and optionally kill its grid pane."""
+    proj_id = args.project
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+
+    # Remove from projects.json
+    removed_from_config = False
+    if PROJECTS_CONFIG.exists():
+        config = json.loads(PROJECTS_CONFIG.read_text(encoding="utf-8"))
+        projects = config.get("projects", [])
+        before = len(projects)
+        config["projects"] = [p for p in projects if p.get("id") != proj_id]
+        if len(config["projects"]) < before:
+            PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+            removed_from_config = True
+            print(f"Removed '{proj_id}' from {PROJECTS_CONFIG}")
+
+    if not removed_from_config:
+        print(f"Project '{proj_id}' not found in config.")
+
+    # Kill the pane in the running grid if it exists
+    if session_exists(session):
+        try:
+            pane = pane_target(session, proj_id)
+            tmux(["kill-pane", "-t", pane.pane_id], timeout=5)
+            apply_layout(session, "tiled")
+            set_window_orchestrator_format(session)
+            print(f"Killed pane for '{proj_id}' in session '{session}'")
+        except (ValueError, RuntimeError):
+            if removed_from_config:
+                print(f"No running pane for '{proj_id}' (will be excluded on next start)")
+
+    return 0
+
+
+def _set_barn_flag(proj_id: str, barn: bool) -> bool:
+    """Set or clear the barn flag for a project in projects.json. Returns True if found."""
+    if not PROJECTS_CONFIG.exists():
+        return False
+    config = json.loads(PROJECTS_CONFIG.read_text(encoding="utf-8"))
+    found = False
+    for p in config.get("projects", []):
+        if p.get("id") == proj_id:
+            if barn:
+                p["barn"] = True
+            else:
+                p.pop("barn", None)
+            found = True
+            break
+    if found:
+        PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return found
+
+
+def _resolve_project_id(token: str, session: str) -> tuple[str, str | None]:
+    """Resolve a token (project id, pane id, index) to (project_id, pane_id).
+
+    If the token is a pane ID like %5, look up the pane and return its project_id.
+    """
+    pane_id = None
+    if session_exists(session):
+        try:
+            pane = pane_target(session, token)
+            pane_id = pane.pane_id
+            if pane.project_id and pane.project_id != "-":
+                return pane.project_id, pane_id
+        except (ValueError, RuntimeError):
+            pass
+    return token, pane_id
+
+
+def run_barn(args: argparse.Namespace) -> int:
+    """Send a project to the barn — remove from grid, keep in config."""
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    proj_id, pane_id = _resolve_project_id(args.project, session)
+
+    if not _set_barn_flag(proj_id, barn=True):
+        print(f"Project '{proj_id}' not found in config.")
+        return 1
+
+    print(f"Sent '{proj_id}' to the barn.")
+
+    # Kill the pane in the running grid
+    if pane_id:
+        try:
+            tmux(["kill-pane", "-t", pane_id], timeout=5)
+            apply_layout(session, "tiled")
+            set_window_orchestrator_format(session)
+            print(f"Removed pane from grid.")
+        except (ValueError, RuntimeError):
+            pass
+
+    return 0
+
+
+def run_unbarn(args: argparse.Namespace) -> int:
+    """Let a project out of the barn — add back to grid."""
+    proj_id = args.project
+    store = load_store()
+    session = args.session or store.get("default_session") or DEFAULT_SESSION
+
+    if not _set_barn_flag(proj_id, barn=False):
+        print(f"Project '{proj_id}' not found in config.")
+        return 1
+
+    print(f"Let '{proj_id}' out of the barn.")
+
+    # Hot-add to running grid
+    if session_exists(session):
+        proj_map = project_map()
+        proj = proj_map.get(proj_id)
+        path = str(proj.get("path", "")) if proj else ""
+        if path:
+            split_for_path(session, path)
+            apply_layout(session, "tiled")
+            panes = list_panes(session)
+            if panes:
+                last_pane = panes[-1]
+                pane_set_project_id(last_pane.pane_id, proj_id)
+                tmux(["select-pane", "-t", last_pane.pane_id, "-T", proj_id], timeout=5)
+            set_window_orchestrator_format(session)
+            print(f"Added pane to grid.")
+    else:
+        print(f"Session not running. Will appear on next start.")
+
+    return 0
+
+
+def run_barn_list(args: argparse.Namespace) -> int:
+    """List projects in the barn."""
+    config = load_projects_config()
+    barn_projects = [p for p in config.get("projects", []) if p.get("barn")]
+    active_projects = [p for p in config.get("projects", []) if not p.get("barn")]
+
+    if active_projects:
+        print(f"\033[32mGrazing ({len(active_projects)}):\033[0m")
+        for p in active_projects:
+            print(f"  {p['id']}")
+
+    if barn_projects:
+        print(f"\n\033[33mIn the barn ({len(barn_projects)}):\033[0m")
+        for p in barn_projects:
+            print(f"  {p['id']}")
+    else:
+        print("\nBarn is empty — all projects are grazing.")
 
     return 0
 
@@ -3365,8 +3540,8 @@ def run_ops(_: argparse.Namespace) -> int:
                 _run_ops_command(["send", token, "--command", text])
         elif command == ["__agent__"]:
             token = input("pane token: ").strip()
-            tool = input("tool (claude|codex|aider|gemini): ").strip().lower()
-            if token and tool in {"claude", "codex", "aider", "gemini"}:
+            tool = input("tool (claude|codex|gemini): ").strip().lower()
+            if token and tool in {"claude", "codex", "gemini"}:
                 _run_ops_command(["agent", token, tool])
         elif command == ["__stop__"]:
             token = input("pane token: ").strip()
@@ -3506,7 +3681,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
 
     agent = teams_sub.add_parser("agent", help="Start an agent command in one pane")
     agent.add_argument("pane")
-    agent.add_argument("tool", choices=["claude", "codex", "aider", "gemini"])
+    agent.add_argument("tool", choices=["claude", "codex", "gemini"])
     agent.add_argument("--session", default=None)
     agent.add_argument("--flags", help="Additional flags passed after tool command")
     agent.add_argument("agent_args", nargs=argparse.REMAINDER, help="Extra args. Use after --, e.g. -- --help")
@@ -3644,6 +3819,24 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     add_cmd.add_argument("--name", help="Project ID override (default: directory name)")
     add_cmd.add_argument("--session", default=None)
     add_cmd.set_defaults(handler=run_add)
+
+    remove_cmd = teams_sub.add_parser("remove", help="Remove a project from config and kill its grid pane")
+    remove_cmd.add_argument("project", help="Project ID to remove")
+    remove_cmd.add_argument("--session", default=None)
+    remove_cmd.set_defaults(handler=run_remove)
+
+    barn_cmd = teams_sub.add_parser("barn", help="Send a project to the barn (keep in config, remove from grid)")
+    barn_cmd.add_argument("project", help="Project ID to barn")
+    barn_cmd.add_argument("--session", default=None)
+    barn_cmd.set_defaults(handler=run_barn)
+
+    unbarn_cmd = teams_sub.add_parser("unbarn", help="Let a project out of the barn (add back to grid)")
+    unbarn_cmd.add_argument("project", help="Project ID to unbarn")
+    unbarn_cmd.add_argument("--session", default=None)
+    unbarn_cmd.set_defaults(handler=run_unbarn)
+
+    barn_list_cmd = teams_sub.add_parser("barn-list", help="List projects: grazing vs in the barn")
+    barn_list_cmd.set_defaults(handler=run_barn_list)
 
     summary_cmd = teams_sub.add_parser("summary", help="Show recent output summary from a pane")
     summary_cmd.add_argument("pane", help="Pane token (project id, index, or pane id)")

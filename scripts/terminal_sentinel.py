@@ -63,7 +63,6 @@ WRAPPER_BINS = {
 AI_TOOL_MARKERS: dict[str, tuple[str, ...]] = {
     "claude": ("claude", "anthropic"),
     "codex": ("codex", "@openai/codex", "/openai/"),
-    "aider": ("aider",),
     "chatgpt": ("chatgpt",),
     "gemini": ("gemini",),
 }

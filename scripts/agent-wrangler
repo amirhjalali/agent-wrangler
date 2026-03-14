@@ -38,6 +38,7 @@ Usage: agent-wrangler <command>
   start             Launch grid + manager + nav (pulls in all Ghostty terminals)
   status            Show pane health overview
   add [path]        Add a project to the running grid
+  remove <project>  Remove a project from grid and config
   summary <pane>    Show recent output from a pane
   ops               Interactive operator console
   exit              Kill the Agent Wrangler session
@@ -61,7 +62,7 @@ case "${1:-}" in
     shift
     set -- teams exit "$@"
     ;;
-  add|summary|init)
+  add|remove|barn|unbarn|barn-list|summary|init)
     set -- teams "$@"
     ;;
   up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail|hide|show|hidden)

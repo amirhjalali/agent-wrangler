@@ -55,7 +55,7 @@ After `agent-wrangler start`, the tmux session has two window types:
 ### Key Design Patterns
 
 - **Auto-discovery**: Ghostty terminals are discovered via process scanning. No config needed — terminals not in `projects.json` are imported using their directory basename and auto-registered.
-- **Health detection**: Scrollback-based — captures pane text and looks for the agent's prompt character (`❯` for Claude Code, `aider>` for Aider, etc.). Green = generating output, yellow = at prompt waiting for input. CPU-based detection doesn't work because AI tools think on remote servers.
+- **Health detection**: Scrollback-based — captures pane text and looks for the agent's prompt character (`❯` for Claude Code, `>` for Codex/Gemini, etc.). Green = generating output, yellow = at prompt waiting for input. CPU-based detection doesn't work because AI tools think on remote servers.
 - **Zoomed navigation**: `Option+z` zooms a pane to fullscreen. `Option+n`/`Option+p` cycle panes while staying zoomed — each pane feels like a full terminal window.
 - **Notifications**: Optional (off by default). Desktop alerts via bundled macOS `.app` with debounce (2 consecutive checks) and cooldown (120s).
 
