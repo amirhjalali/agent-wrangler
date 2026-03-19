@@ -2996,6 +2996,13 @@ def run_agent(args: argparse.Namespace) -> int:
         extra = extra[1:]
     tokens.extend(extra)
     command = " ".join(token for token in tokens if token)
+
+    # Auto-pilot: Claude gets --dangerously-skip-permissions unless opted out
+    if tool == "claude" and "--dangerously-skip-permissions" not in command:
+        if not getattr(args, "no_auto", False):
+            tokens.insert(1, "--dangerously-skip-permissions")
+            command = " ".join(token for token in tokens if token)
+
     pane_send(pane.pane_id, command, enter=True)
     play_sound("Morse", 0.3, key=f"agent-{pane.pane_id}")
     print(f"launched agent in {pane.pane_id} ({pane.pane_title}): {command}")
@@ -4134,6 +4141,8 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     agent.add_argument("tool", choices=["claude", "codex", "gemini"])
     agent.add_argument("--session", default=None)
     agent.add_argument("--flags", help="Additional flags passed after tool command")
+    agent.add_argument("--no-auto", action="store_true",
+                        help="Don't add --dangerously-skip-permissions to claude")
     agent.add_argument("agent_args", nargs=argparse.REMAINDER, help="Extra args. Use after --, e.g. -- --help")
     agent.set_defaults(handler=run_agent)
 
