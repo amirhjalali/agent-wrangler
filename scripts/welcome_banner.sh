@@ -24,16 +24,21 @@ NAV_HINTS="  ⌥m manager  ⌥g grid  ⌥z zoom  ⌥n/p cycle  ⌥j jump"
 
 FINAL_COLOR=130  # rust
 
-# --- Hat tip helper: shift hat portion of a line right ---
-hat_tip() {
-    local line="$1" split="$2" shift_n="$3"
+# --- Hat shift helper: move hat portion by offset chars (+ right, − left) ---
+hat_shift() {
+    local line="$1" split="$2" offset="$3"
     local text="${line:0:$split}"
     local hat="${line:$split}"
-    local pad=""
-    for ((s=0; s<shift_n; s++)); do pad+=" "; done
-    local shifted="${text}${pad}${hat}"
-    # Trim to original length
-    printf '%s' "${shifted:0:${#line}}"
+    if (( offset > 0 )); then
+        local pad=""
+        for ((s=0; s<offset; s++)); do pad+=" "; done
+        printf '%s' "${text}${pad}${hat}"
+    elif (( offset < 0 )); then
+        local abs=$(( -offset ))
+        printf '%s' "${text}${hat:$abs}"
+    else
+        printf '%s' "$line"
+    fi
 }
 
 # --- Helper: print the final (fully warm) state ---
@@ -94,55 +99,38 @@ printf '\033[0m\n'
 printf '\033[2m%s\033[0m\n' "$TAGLINE"
 printf '\033[2m%s\033[0m\n\n' "$NAV_HINTS"
 
-# --- Phase 2: Hat tip animation ---
-# The cowboy hat tips right (like a greeting) then settles back.
+# --- Phase 2: Hat sway — slow horse-riding strut ---
+# The cowboy hat sways gently left and right like a rider on a slow horse.
 if (( SKIPPED == 0 )); then
-    sleep 0.25  # brief pause before the tip
+    sleep 0.3  # pause before the strut begins
 
-    # Column where hat area begins on each row
-    SPLIT0=45  # row 0: after AGENT text
-    SPLIT1=42  # row 1: after A text
+    # Smooth sine-wave sway offsets (2 full cycles)
+    SWAY=(1 2 1 0 -1 -2 -1 0 1 2 1 0 -1 -2 -1 0)
 
-    # Pre-generate tipped lines
-    ROW0_T1=$(hat_tip "${ART[0]}" $SPLIT0 1)
-    ROW0_T2=$(hat_tip "${ART[0]}" $SPLIT0 2)
-    ROW1_T1=$(hat_tip "${ART[1]}" $SPLIT1 1)
+    # Column where hat region starts per row (rows 0–3 carry hat art)
+    S0=45; S1=42; S2=42; S3=42
 
-    # Cursor math: go from bottom to row 0 of art
-    # Art (HEIGHT lines) + 1 reset newline + 1 tagline + 1 hints + 1 extra newline = HEIGHT+4
+    # Cursor math: art(HEIGHT) + blank + tagline + hints + blank = HEIGHT+4
     UP=$((HEIGHT + 4))
 
-    for tip_frame in 1 2 3 4; do
+    for offset in "${SWAY[@]}"; do
         if read -rsn1 -t 0 _key 2>/dev/null; then
-            # Snap hat back to final position on skip
+            # Snap to rest position on skip
             printf '\033[%dA' "$UP"
-            printf '\033[38;5;%dm%s\033[0m\n' "$FINAL_COLOR" "${ART[0]}"
-            printf '\033[38;5;%dm%s\033[0m\n' "$FINAL_COLOR" "${ART[1]}"
-            printf '\033[%dB' "$((UP - 2))"
+            printf '\033[38;5;%dm' "$FINAL_COLOR"
+            for ((r=0; r<4; r++)); do printf '%s\033[K\n' "${ART[$r]}"; done
+            printf '\033[0m\033[%dB' "$((UP - 4))"
             break
         fi
 
         printf '\033[%dA' "$UP"
-        case $tip_frame in
-            1)  # Start tipping right — crown shifts 1
-                printf '\033[38;5;%dm%s\033[0m\n' "$FINAL_COLOR" "$ROW0_T1"
-                printf '\033[38;5;%dm%s\033[0m\n' "$FINAL_COLOR" "${ART[1]}"
-                ;;
-            2)  # Full tip — crown shifts 2, body shifts 1
-                printf '\033[38;5;%dm%s\033[0m\n' "$FINAL_COLOR" "$ROW0_T2"
-                printf '\033[38;5;%dm%s\033[0m\n' "$FINAL_COLOR" "$ROW1_T1"
-                ;;
-            3)  # Returning — crown shifts 1
-                printf '\033[38;5;%dm%s\033[0m\n' "$FINAL_COLOR" "$ROW0_T1"
-                printf '\033[38;5;%dm%s\033[0m\n' "$FINAL_COLOR" "${ART[1]}"
-                ;;
-            4)  # Settled — back to original
-                printf '\033[38;5;%dm%s\033[0m\n' "$FINAL_COLOR" "${ART[0]}"
-                printf '\033[38;5;%dm%s\033[0m\n' "$FINAL_COLOR" "${ART[1]}"
-                ;;
-        esac
-        printf '\033[%dB' "$((UP - 2))"
-        sleep 0.1
+        printf '\033[38;5;%dm' "$FINAL_COLOR"
+        printf '%s\033[K\n' "$(hat_shift "${ART[0]}" $S0 "$offset")"
+        printf '%s\033[K\n' "$(hat_shift "${ART[1]}" $S1 "$offset")"
+        printf '%s\033[K\n' "$(hat_shift "${ART[2]}" $S2 "$offset")"
+        printf '%s\033[K\n' "$(hat_shift "${ART[3]}" $S3 "$offset")"
+        printf '\033[0m\033[%dB' "$((UP - 4))"
+        sleep 0.13
     done
 fi
 

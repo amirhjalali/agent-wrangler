@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import subprocess
@@ -1793,15 +1794,110 @@ def _campfire_header(frame: int, counts: dict[str, int]) -> list[str]:
     return lines
 
 
+# --- Barn discovery cache ---
+_barn_cache: list[dict[str, str]] = []
+_barn_cache_time: float = 0.0
+_BARN_CACHE_TTL = 60.0  # rescan ~/  every 60 seconds
+
+
+def _discover_barn_repos(active_project_ids: set[str]) -> list[dict[str, str]]:
+    """Scan ~/ for git repos not currently active in the grid. Cached."""
+    global _barn_cache, _barn_cache_time
+    import time as _t
+
+    now = _t.time()
+    if _barn_cache and (now - _barn_cache_time) < _BARN_CACHE_TTL:
+        # Return cached list filtered against current active set
+        return [r for r in _barn_cache if r["id"] not in active_project_ids]
+
+    home = Path.home()
+    repos: list[dict[str, str]] = []
+    try:
+        for entry in sorted(home.iterdir()):
+            if entry.name.startswith(".") or not entry.is_dir():
+                continue
+            if str(entry) == SELF_PATH:
+                continue  # exclude agent-wrangler itself
+            if (entry / ".git").is_dir():
+                repos.append({
+                    "id": entry.name.replace(" ", "-").lower(),
+                    "name": entry.name,
+                    "path": str(entry),
+                })
+    except OSError:
+        pass
+
+    _barn_cache = repos
+    _barn_cache_time = now
+    return [r for r in repos if r["id"] not in active_project_ids]
+
+
+def _graze_project(path: str) -> None:
+    """Open a project in a new Ghostty tab and launch Claude in it."""
+    escaped_path = path.replace("\\", "\\\\").replace('"', '\\"')
+    script = (
+        'tell application "Ghostty"\n'
+        "    set cfg to new surface configuration\n"
+        f'    set initial working directory of cfg to "{escaped_path}"\n'
+        "    set t to new tab in front window with configuration cfg\n"
+        '    input text "claude --dangerously-skip-permissions" to t\n'
+        '    send key "enter" to t\n'
+        "end tell"
+    )
+    try:
+        subprocess.Popen(
+            ["osascript", "-e", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+
 def run_rail(args: argparse.Namespace) -> int:
     """Auto-refreshing ranch board status rail for a narrow tmux split."""
     import time as _time
+    import tty
+    import termios
     global _campfire_frame
 
     ensure_tmux()
     store = load_store()
     session = args.session or store.get("default_session") or DEFAULT_SESSION
     interval = max(1, int(args.interval))
+
+    # Set stdin to raw mode for non-blocking keypress detection (barn graze)
+    old_tty_settings = None
+    if sys.stdin.isatty():
+        try:
+            old_tty_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+            sys.stdout.write("\033[?1000h\033[?1006h")  # enable SGR mouse tracking
+            sys.stdout.flush()
+        except termios.error:
+            pass
+
+    def _restore_tty() -> None:
+        try:
+            sys.stdout.write("\033[?1000l\033[?1006l")  # disable mouse tracking
+            sys.stdout.flush()
+        except OSError:
+            pass
+        if old_tty_settings is not None:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_tty_settings)
+            except termios.error:
+                pass
+
+    try:
+        return _rail_loop(args, session, interval, _time)
+    finally:
+        _restore_tty()
+
+
+def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any) -> int:
+    """Inner rail loop (separated so tty restore happens in finally)."""
+    global _campfire_frame
 
     while True:
         if not session_exists(session):
@@ -1935,19 +2031,79 @@ def run_rail(args: argparse.Namespace) -> int:
                 agent_label = f"  {ha}" if ha and ha != "-" else ""
                 lines.append(f" \033[2m○ {hp:<16}{agent_label}  {hs}\033[0m")
 
-        # --- Barn count ---
-        barn_projects = [p for p in load_projects_config().get("projects", []) if p.get("barn")]
-        if barn_projects:
-            lines.append(f" \033[38;5;130m{len(barn_projects)} in barn\033[0m")
-
         # --- Last roundup timestamp ---
         now_str = datetime.now().strftime("%H:%M:%S")
         lines.append(f"\n\033[2m  last roundup: {now_str}\033[0m")
 
+        # --- Barn: discovered repos not in the grid ---
+        active_ids = {
+            str(row.get("project_id") or row.get("pane_title") or "")
+            for row in rows
+        }
+        # Also include hidden pane IDs
+        for h in (hidden if hidden else []):
+            hid = str(h.get("project_id") or "")
+            if hid:
+                active_ids.add(hid)
+
+        barn_repos = _discover_barn_repos(active_ids)
+        barn_item_y: dict[int, int] = {}  # terminal Y coord → barn index (0-based)
+        if barn_repos:
+            lines.append("\033[2m" + "─" * 34 + "\033[0m")
+            lines.append(f" \033[38;5;130mIN THE BARN ({len(barn_repos)})\033[0m")
+            # Show up to 9 numbered entries
+            for idx, repo in enumerate(barn_repos[:9], 1):
+                name = repo["name"]
+                if len(name) > 22:
+                    name = name[:21] + "~"
+                barn_item_y[len(lines) + 1] = idx - 1  # Y = lines index + 1
+                lines.append(f" \033[2m[{idx}] {name}\033[0m")
+            if len(barn_repos) > 9:
+                lines.append(f" \033[2m    +{len(barn_repos) - 9} more\033[0m")
+            lines.append(f" \033[2m click or press 1-{min(len(barn_repos), 9)} to graze\033[0m")
+
         print("\n".join(lines), flush=True)
 
+        # --- Non-blocking keypress + mouse click detection for barn graze ---
         try:
-            _time.sleep(interval)
+            deadline = _time.time() + interval
+            while _time.time() < deadline:
+                remaining = deadline - _time.time()
+                if remaining <= 0:
+                    break
+                ready, _, _ = select.select([sys.stdin], [], [], min(remaining, 0.2))
+                if ready:
+                    key = sys.stdin.read(1)
+                    if key == '\033':
+                        # Read rest of escape sequence (mouse click or other)
+                        buf = '\033'
+                        while len(buf) < 32:
+                            r2, _, _ = select.select([sys.stdin], [], [], 0.05)
+                            if not r2:
+                                break
+                            ch = sys.stdin.read(1)
+                            buf += ch
+                            if ch in ('M', 'm') and '[<' in buf:
+                                break  # SGR mouse sequence complete
+                        # Parse SGR mouse press: \033[<button;x;yM
+                        if len(buf) > 5 and buf[1:3] == '[<' and buf[-1] == 'M':
+                            parts = buf[3:-1].split(';')
+                            if len(parts) == 3:
+                                try:
+                                    btn, _mx, my = int(parts[0]), int(parts[1]), int(parts[2])
+                                    if btn == 0 and my in barn_item_y:
+                                        chosen = barn_repos[barn_item_y[my]]
+                                        _graze_project(chosen["path"])
+                                        global _barn_cache_time
+                                        _barn_cache_time = 0.0
+                                        break
+                                except (ValueError, IndexError):
+                                    pass
+                    elif key.isdigit() and 1 <= int(key) <= min(len(barn_repos) if barn_repos else 0, 9):
+                        chosen = barn_repos[int(key) - 1]
+                        _graze_project(chosen["path"])
+                        _barn_cache_time = 0.0
+                        break
         except KeyboardInterrupt:
             break
     return 0
