@@ -91,6 +91,7 @@ _prev_rail_costs: dict[str, float] = {}  # project_id → previous cost
 _sparkle_countdown: dict[str, int] = {}  # project_id → frames remaining for ✦
 _transition_state: dict[str, list[str]] = {}  # project_id → color transition queue
 _campfire_frame: int = 0  # flickering campfire frame counter
+_prev_activity_state: dict[str, dict[str, Any]] = {}  # project_id -> last logged state
 
 
 @dataclass
@@ -1910,6 +1911,7 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
             capture_lines=40,
             wait_attention_min=5,
         )
+        _log_transitions(rows)
 
         lines: list[str] = []
         lines.append("\033[2J\033[H")  # clear screen
@@ -2153,8 +2155,9 @@ def run_watch(args: argparse.Namespace) -> int:
                 session=session,
                 capture_lines=args.capture_lines,
                 wait_attention_min=args.wait_attention_min,
-        
+
             )
+            _log_transitions(rows)
             if not args.no_clear:
                 print("\033[2J\033[H", end="")
             attention = len([row for row in rows if row.get("needs_attention")])
@@ -3374,6 +3377,61 @@ def _read_activity(*, since_minutes: float = 0, limit: int = 500) -> list[dict[s
         return results
     except Exception:
         return []
+
+
+def _log_transitions(rows: list[dict[str, Any]]) -> None:
+    """Log health/status transitions to the activity log.
+
+    Compares each row against ``_prev_activity_state`` and emits an entry
+    when the health or status value has changed (or when the project is
+    observed for the first time).  The ``ts`` field is intentionally
+    omitted so that ``_append_activity`` adds it automatically.
+    """
+    entries: list[dict[str, Any]] = []
+    for row in rows:
+        project = str(row.get("project_id") or row.get("pane_title") or "")
+        if not project or project == "-":
+            continue
+
+        health = str(row.get("health") or "green")
+        status = str(row.get("status") or "idle")
+        agent = str(row.get("agent") or "-")
+        reason = str(row.get("reason") or "")
+        cc = row.get("cc_stats") or {}
+
+        prev = _prev_activity_state.get(project)
+
+        if prev is None:
+            event = "first_seen"
+        elif prev.get("health") != health:
+            event = f"health_{prev.get('health')}_to_{health}"
+        elif prev.get("status") != status:
+            event = f"status_{prev.get('status')}_to_{status}"
+        else:
+            # No change — skip.
+            continue
+
+        entry: dict[str, Any] = {
+            "project": project,
+            "event": event,
+            "health": health,
+            "status": status,
+            "agent": agent,
+        }
+        if reason:
+            entry["reason"] = reason
+        cost = cc.get("cost")
+        if cost is not None:
+            entry["cost"] = cost
+        context_pct = cc.get("context_pct")
+        if context_pct is not None:
+            entry["context_pct"] = context_pct
+
+        entries.append(entry)
+        _prev_activity_state[project] = {"health": health, "status": status}
+
+    if entries:
+        _append_activity(entries)
 
 
 def run_init(_: argparse.Namespace) -> int:
