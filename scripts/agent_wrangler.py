@@ -3290,6 +3290,92 @@ def check_and_notify(rows: list[dict[str, Any]]) -> None:
     _save_health_state(new_state)
 
 
+# ---------------------------------------------------------------------------
+# Activity log — append-only JSONL for graze / barn discovery
+# ---------------------------------------------------------------------------
+
+ACTIVITY_LOG_PATH = ROOT / ".state" / "activity.jsonl"
+ACTIVITY_MAX_BYTES = 5 * 1024 * 1024  # 5 MB, then rotate
+
+
+def _append_activity(entries: list[dict[str, Any]]) -> None:
+    """Append activity entries to the JSONL log.
+
+    Each entry is written as a single JSON line with an auto-added ``ts``
+    field (ISO-8601 UTC) when one is not already present.  The log file is
+    rotated to ``*.jsonl.old`` once it exceeds *ACTIVITY_MAX_BYTES*.
+
+    All errors are silently swallowed — this is a non-critical feature and
+    must never interfere with normal operation.
+    """
+    try:
+        ACTIVITY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # Rotate if the file is too large.
+        if ACTIVITY_LOG_PATH.exists() and ACTIVITY_LOG_PATH.stat().st_size > ACTIVITY_MAX_BYTES:
+            rotated = ACTIVITY_LOG_PATH.with_suffix(".jsonl.old")
+            ACTIVITY_LOG_PATH.replace(rotated)
+
+        now = datetime.now(timezone.utc).isoformat()
+        with ACTIVITY_LOG_PATH.open("a", encoding="utf-8") as fh:
+            for entry in entries:
+                if "ts" not in entry:
+                    entry = {**entry, "ts": now}
+                fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
+def _read_activity(*, since_minutes: float = 0, limit: int = 500) -> list[dict[str, Any]]:
+    """Read activity entries from the JSONL log.
+
+    Parameters
+    ----------
+    since_minutes:
+        When > 0, only entries whose ``ts`` field is within the last
+        *since_minutes* minutes are returned.
+    limit:
+        Maximum number of entries to return (most recent first after
+        filtering).
+
+    Returns an empty list on any error.
+    """
+    try:
+        if not ACTIVITY_LOG_PATH.exists():
+            return []
+
+        lines = ACTIVITY_LOG_PATH.read_text(encoding="utf-8").splitlines()
+        results: list[dict[str, Any]] = []
+
+        if since_minutes > 0:
+            cutoff = datetime.now(timezone.utc).timestamp() - since_minutes * 60
+            for line in lines:
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                ts_str = entry.get("ts", "")
+                if ts_str:
+                    try:
+                        entry_ts = datetime.fromisoformat(ts_str).timestamp()
+                    except (ValueError, TypeError):
+                        continue
+                    if entry_ts >= cutoff:
+                        results.append(entry)
+                # entries without ts are skipped when filtering by time
+        else:
+            for line in lines:
+                if not line.strip():
+                    continue
+                results.append(json.loads(line))
+
+        # Return the most recent entries, respecting the limit.
+        if len(results) > limit:
+            results = results[-limit:]
+        return results
+    except Exception:
+        return []
+
+
 def run_init(_: argparse.Namespace) -> int:
     """Interactive project setup — scan for git repos and create projects.json."""
     if PROJECTS_CONFIG.exists():
