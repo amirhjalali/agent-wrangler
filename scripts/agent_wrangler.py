@@ -92,6 +92,8 @@ _sparkle_countdown: dict[str, int] = {}  # project_id → frames remaining for �
 _transition_state: dict[str, list[str]] = {}  # project_id → color transition queue
 _campfire_frame: int = 0  # flickering campfire frame counter
 _prev_activity_state: dict[str, dict[str, Any]] = {}  # project_id -> last logged state
+_last_active_time: dict[str, float] = {}  # project_id -> timestamp when last seen green
+_STALL_THRESHOLD_MIN = 10  # minutes of waiting after being active = stalled
 
 
 @dataclass
@@ -1985,6 +1987,16 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
             line = f" {dot_color}●\033[0m{sparkle} {project:<16}"
             if agent and agent != "-":
                 line += f" \033[2m{agent:<8}\033[0m"
+
+            # Stall detection: track when last green, show idle time if yellow too long
+            if health == "green":
+                _last_active_time[project] = time.time()
+            elif health == "yellow" and project in _last_active_time:
+                idle_min = (time.time() - _last_active_time[project]) / 60.0
+                if idle_min >= _STALL_THRESHOLD_MIN:
+                    line += f" \033[31m{int(idle_min)}m idle\033[0m"
+                elif idle_min >= 2:
+                    line += f" \033[2m{int(idle_min)}m\033[0m"
 
             lines.append(line)
 
