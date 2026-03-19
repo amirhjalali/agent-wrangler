@@ -3864,6 +3864,144 @@ def run_ops(_: argparse.Namespace) -> int:
         print("")
 
 
+def run_briefing(args: argparse.Namespace) -> int:
+    """Show what happened while the user was away."""
+    RUST = "\033[38;5;130m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    DIM = "\033[2m"
+    RST = "\033[0m"
+
+    since = getattr(args, "since", 60)
+    entries = _read_activity(since_minutes=since)
+
+    if not entries:
+        print(f"{DIM}No activity recorded in the last {since} minutes.{RST}")
+        print(f"{DIM}The rail must be running to collect activity data.{RST}")
+        return 0
+
+    # Group entries by project
+    by_project: dict[str, list[dict[str, Any]]] = {}
+    for e in entries:
+        proj = e.get("project", "unknown")
+        by_project.setdefault(proj, []).append(e)
+
+    # Calculate time span
+    all_ts: list[datetime] = []
+    for e in entries:
+        ts_str = e.get("ts", "")
+        if ts_str:
+            try:
+                all_ts.append(datetime.fromisoformat(ts_str))
+            except (ValueError, TypeError):
+                pass
+    if len(all_ts) >= 2:
+        span_minutes = (max(all_ts) - min(all_ts)).total_seconds() / 60
+    elif all_ts:
+        span_minutes = 0
+    else:
+        span_minutes = 0
+
+    health_colors = {"green": GREEN, "yellow": YELLOW, "red": RED}
+    health_dots = {"green": "\u25cf", "yellow": "\u25cf", "red": "\u25cf"}
+
+    print(f"\n{RUST}{'=' * 60}{RST}")
+    print(f"{RUST}  BRIEFING{RST}  {DIM}last {since} minutes{RST}")
+    print(f"{RUST}{'=' * 60}{RST}\n")
+
+    needs_attention: list[str] = []
+    total_health_counts: dict[str, int] = {}
+
+    for proj, proj_entries in sorted(by_project.items()):
+        latest = proj_entries[-1]
+        health = latest.get("health", "green")
+        status = latest.get("status", "idle")
+        agent = latest.get("agent", "-")
+        color = health_colors.get(health, DIM)
+
+        total_health_counts[health] = total_health_counts.get(health, 0) + 1
+
+        # Project header with colored dot
+        dot = f"{color}{health_dots.get(health, '?')}{RST}"
+        header = f"  {dot} {RUST}{proj}{RST}"
+        if agent and agent != "-":
+            header += f"  {DIM}({agent}){RST}"
+        header += f"  {DIM}{health}/{status}{RST}"
+        print(header)
+
+        # Timeline of events (skip first_seen)
+        timeline_events = [e for e in proj_entries if e.get("event") != "first_seen"]
+        if timeline_events:
+            for ev in timeline_events:
+                ts_str = ev.get("ts", "")
+                event = ev.get("event", "?")
+                reason = ev.get("reason", "")
+                time_label = ""
+                if ts_str:
+                    try:
+                        dt = datetime.fromisoformat(ts_str)
+                        time_label = dt.strftime("%H:%M")
+                    except (ValueError, TypeError):
+                        pass
+                ev_health = ev.get("health", "green")
+                ev_color = health_colors.get(ev_health, DIM)
+                line = f"    {DIM}{time_label}{RST}  {ev_color}{event}{RST}"
+                if reason:
+                    line += f"  {DIM}{reason}{RST}"
+                print(line)
+
+        # Error count
+        red_count = sum(1 for e in proj_entries if e.get("health") == "red")
+        if red_count:
+            print(f"    {RED}errors: {red_count}{RST}")
+
+        # Cost info
+        costs = [e.get("cost") for e in proj_entries if e.get("cost") is not None]
+        if costs:
+            current_cost = costs[-1]
+            cost_line = f"    {DIM}cost: ${current_cost:.2f}{RST}"
+            if len(costs) >= 2:
+                delta = costs[-1] - costs[0]
+                if delta > 0:
+                    cost_line += f"  {DIM}(+${delta:.2f}){RST}"
+            print(cost_line)
+
+        if health == "red":
+            needs_attention.append(proj)
+
+        print()
+
+    # Overall summary
+    print(f"{RUST}{'─' * 60}{RST}")
+    summary_parts = [f"{len(by_project)} projects"]
+    if span_minutes > 0:
+        summary_parts.append(f"{span_minutes:.0f}m span")
+    health_summary = []
+    for h in ("green", "yellow", "red"):
+        count = total_health_counts.get(h, 0)
+        if count:
+            c = health_colors.get(h, "")
+            health_summary.append(f"{c}{count} {h}{RST}")
+    if health_summary:
+        summary_parts.append(" / ".join(health_summary))
+    print(f"  {' | '.join(summary_parts)}")
+
+    # Needs attention section
+    if needs_attention:
+        print(f"\n  {RED}Needs attention:{RST}")
+        for proj in needs_attention:
+            latest = by_project[proj][-1]
+            reason = latest.get("reason", "")
+            line = f"    {RED}\u25cf{RST} {proj}"
+            if reason:
+                line += f"  {DIM}{reason}{RST}"
+            print(line)
+
+    print()
+    return 0
+
+
 def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None:
     teams = root_subparsers.add_parser("teams", help="Tmux team grid operations")
     teams_sub = teams.add_subparsers(dest="teams_command", required=True)
@@ -4155,6 +4293,10 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     summary_cmd.add_argument("--session", default=None)
     summary_cmd.add_argument("--lines", type=int, default=50, help="Lines to capture")
     summary_cmd.set_defaults(handler=run_summary)
+
+    briefing_cmd = teams_sub.add_parser("briefing", help="Show what happened while you were away")
+    briefing_cmd.add_argument("--since", type=int, default=60, help="Look back N minutes (default: 60)")
+    briefing_cmd.set_defaults(handler=run_briefing)
 
     doctor = teams_sub.add_parser("doctor", help="Diagnose broken/waiting agent panes")
     doctor.add_argument("--session", default=None, help="Tmux session (default: configured default_session)")

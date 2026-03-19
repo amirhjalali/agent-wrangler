@@ -62,7 +62,7 @@ case "${1:-}" in
     shift
     set -- teams exit "$@"
     ;;
-  add|remove|barn|unbarn|barn-list|summary|init)
+  add|remove|barn|unbarn|barn-list|summary|briefing|init)
     set -- teams "$@"
     ;;
   up|bootstrap|import|attach|status|paint|watch|manager|nav|send|stop|restart|agent|focus|kill|shell|layout|capture|projects|persistence|profile|hooks|doctor|drift|rail|hide|show|hidden)
