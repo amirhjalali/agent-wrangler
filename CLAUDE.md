@@ -28,7 +28,7 @@ All commands run from the repo root.
 - `./scripts/agent-wrangler barn-list` — Show projects: grazing vs in the barn
 - `./scripts/agent-wrangler exit` — Kill session
 
-**No build step, no test suite.** Pure Python 3.10+ and Bash. No package manager or virtual environment needed. All dependencies are stdlib.
+**No build step.** Pure Python 3.10+ and Bash. Tests: `python3 -m pytest tests/ -v`. All dependencies are stdlib (pytest for testing).
 
 ## Architecture
 
