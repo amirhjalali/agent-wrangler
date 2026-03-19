@@ -1685,12 +1685,16 @@ def run_ops(_: argparse.Namespace) -> int:
         ("Start all (import + grid + manager)", ["start"]),
         ("Attach grid session", ["attach"]),
         ("Show herd status", ["status"]),
+        ("Briefing (what happened while away)", ["briefing"]),
         ("Focus pane by name", ["__focus__"]),
         ("Send command to pane", ["__send__"]),
         ("Saddle up agent", ["__agent__"]),
+        ("Dispatch to all agents", ["__dispatch__"]),
+        ("Dispatch to waiting agents", ["__dispatch_waiting__"]),
         ("Whoa (stop pane)", ["__stop__"]),
         ("Open manager window", ["manager", "--replace"]),
         ("Doctor (check attention)", ["doctor", "--only-attention"]),
+        ("Barn list (grazing vs barn)", ["barn-list"]),
     ]
 
     # Ranch operations header
@@ -1750,6 +1754,14 @@ def run_ops(_: argparse.Namespace) -> int:
             tool = input("tool (claude|codex|gemini): ").strip().lower()
             if token and tool in {"claude", "codex", "gemini"}:
                 _run_ops_command(["agent", token, tool])
+        elif command == ["__dispatch__"]:
+            text = input("prompt: ").strip()
+            if text:
+                _run_ops_command(["dispatch", "--all", "--yes", text])
+        elif command == ["__dispatch_waiting__"]:
+            text = input("prompt: ").strip()
+            if text:
+                _run_ops_command(["dispatch", "--waiting", "--yes", text])
         elif command == ["__stop__"]:
             token = input("pane token: ").strip()
             if token:
