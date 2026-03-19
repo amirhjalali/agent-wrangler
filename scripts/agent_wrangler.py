@@ -1893,6 +1893,56 @@ def run_briefing(args: argparse.Namespace) -> int:
 
         print()
 
+    # --- Live pane snapshots ---
+    # If a tmux session is running, show a few lines from each agent pane
+    store = load_store()  # noqa: F405
+    session = store.get("default_session") or _core.DEFAULT_SESSION
+    if session_exists(session):  # noqa: F405
+        try:
+            pane_rows = refresh_pane_health(  # noqa: F405
+                session=session,
+                capture_lines=10,
+                wait_attention_min=5,
+                apply_colors=False,
+            )
+            agent_panes = [r for r in pane_rows if r.get("agent") and r.get("agent") != "-"]
+            if agent_panes:
+                print(f"  {RUST}LIVE SNAPSHOTS{RST}\n")
+                for row in agent_panes:
+                    project = str(row.get("project_id") or "?")
+                    pane_id = str(row.get("pane_id") or "")
+                    health = str(row.get("health") or "green")
+                    dot_color = {"green": GREEN, "yellow": YELLOW, "red": RED}.get(health, RST)
+
+                    if not pane_id:
+                        continue
+
+                    raw = capture_pane_raw(pane_id, lines=8)  # noqa: F405
+                    # Extract meaningful lines (skip empty, prompts, status bars)
+                    meaningful = []
+                    for ln in raw.splitlines():
+                        stripped = ln.strip()
+                        if not stripped:
+                            continue
+                        if stripped in ("$", "%", ">", "❯", "❯ "):
+                            continue
+                        # Skip Claude Code status bar lines
+                        if any(k in stripped for k in ("Opus ", "Sonnet ", "Haiku ", "○○", "●●", "bypass permissions", "extra $")):
+                            continue
+                        meaningful.append(stripped)
+
+                    print(f"  {dot_color}●{RST} {project}")
+                    if meaningful:
+                        # Show last 3 meaningful lines
+                        for ln in meaningful[-3:]:
+                            display = ln[:70] + "..." if len(ln) > 70 else ln
+                            print(f"    {DIM}{display}{RST}")
+                    else:
+                        print(f"    {DIM}(no recent output){RST}")
+                    print()
+        except Exception:
+            pass  # Non-critical — don't break briefing if tmux is unavailable
+
     # Overall summary
     print(f"{RUST}{'─' * 60}{RST}")
     summary_parts = [f"{len(by_project)} projects"]
@@ -1920,6 +1970,102 @@ def run_briefing(args: argparse.Namespace) -> int:
             print(line)
 
     print()
+    return 0
+
+
+def run_dispatch(args: argparse.Namespace) -> int:
+    """Send a prompt to multiple agent panes at once."""
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if not session_exists(session):  # noqa: F405
+        raise ValueError(f"Session '{session}' does not exist")
+
+    message = args.message
+    if not message:
+        raise ValueError("No message provided. Usage: agent-wrangler dispatch --all 'your prompt here'")
+
+    # Determine target panes
+    rows = refresh_pane_health(  # noqa: F405
+        session=session,
+        capture_lines=20,
+        wait_attention_min=5,
+        apply_colors=False,
+    )
+
+    if args.all:
+        # Send to all panes that have an agent
+        targets = [row for row in rows if row.get("agent") and row.get("agent") != "-"]
+    elif args.targets:
+        # Send to specific projects
+        target_ids = [t.strip() for t in args.targets.split(",") if t.strip()]
+        targets = [row for row in rows if str(row.get("project_id") or "") in target_ids]
+        if not targets:
+            raise ValueError(f"No matching panes for: {args.targets}")
+    elif args.waiting:
+        # Send to all waiting/idle agents (yellow panes)
+        targets = [
+            row for row in rows
+            if row.get("agent") and row.get("agent") != "-"
+            and str(row.get("health")) == "yellow"
+        ]
+    else:
+        raise ValueError("Specify --all, --waiting, or --targets project1,project2")
+
+    if not targets:
+        print("No matching agent panes to dispatch to.")
+        return 0
+
+    # Confirm before sending
+    RUST = "\033[38;5;130m"
+    GREEN = "\033[32m"
+    DIM = "\033[2m"
+    RST = "\033[0m"
+
+    print(f"\n  {RUST}DISPATCH{RST} to {len(targets)} agent(s):\n")
+    for row in targets:
+        project = str(row.get("project_id") or "?")
+        agent = str(row.get("agent") or "?")
+        health = str(row.get("health") or "?")
+        dot_color = {"green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m"}.get(health, RST)
+        print(f"  {dot_color}\u25cf{RST} {project:<20} {DIM}{agent}{RST}")
+
+    print(f"\n  {DIM}Message:{RST} {message[:80]}{'...' if len(message) > 80 else ''}\n")
+
+    if not args.yes:
+        try:
+            answer = input(f"  {RUST}Send to all? [y/N]{RST} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 1
+        if answer not in ("y", "yes"):
+            print("  Aborted.")
+            return 1
+
+    # Send the message to each target
+    sent = 0
+    for row in targets:
+        pane_id = str(row.get("pane_id") or "")
+        project = str(row.get("project_id") or "?")
+        if not pane_id:
+            continue
+        try:
+            pane_send(pane_id, message, enter=True)  # noqa: F405
+            print(f"  {GREEN}\u2713{RST} {project}")
+            sent += 1
+        except ValueError as exc:
+            print(f"  \033[31m\u2717{RST} {project}: {exc}")
+
+    print(f"\n  Dispatched to {sent}/{len(targets)} agents.\n")
+
+    # Log the dispatch
+    _core._append_activity([{
+        "project": "_system",
+        "event": "dispatch",
+        "targets": [str(row.get("project_id") or "") for row in targets],
+        "message": message[:200],
+    }])
+
     return 0
 
 
@@ -2222,6 +2368,15 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     briefing_cmd = teams_sub.add_parser("briefing", help="Show what happened while you were away")
     briefing_cmd.add_argument("--since", type=int, default=60, help="Look back N minutes (default: 60)")
     briefing_cmd.set_defaults(handler=run_briefing)
+
+    dispatch_cmd = teams_sub.add_parser("dispatch", help="Send a prompt to multiple agents at once")
+    dispatch_cmd.add_argument("message", nargs="?", help="The prompt to send")
+    dispatch_cmd.add_argument("--all", action="store_true", help="Send to all panes with agents")
+    dispatch_cmd.add_argument("--waiting", action="store_true", help="Send to all waiting/idle agents")
+    dispatch_cmd.add_argument("--targets", help="Comma-separated project IDs")
+    dispatch_cmd.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    dispatch_cmd.add_argument("--session", default=None)
+    dispatch_cmd.set_defaults(handler=run_dispatch)
 
     doctor = teams_sub.add_parser("doctor", help="Diagnose broken/waiting agent panes")
     doctor.add_argument("--session", default=None, help="Tmux session (default: configured default_session)")
