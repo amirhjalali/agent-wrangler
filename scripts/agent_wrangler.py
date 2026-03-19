@@ -6,1749 +6,31 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import select
 import shlex
 import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import terminal_sentinel
+# Ensure aw package is importable
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
-ROOT = Path(__file__).resolve().parents[1]
-SELF_PATH = str(ROOT)  # Agent-wrangler's own repo — the cowboy, not a horse
-CONFIG_PATH = ROOT / "config" / "team_grid.json"
-PERSISTENCE_DIR = ROOT / ".state" / "persistence"
+from aw.core import *  # noqa: F403
+import aw.core as _core
 
-DEFAULT_SESSION = "amir-grid"
-DEFAULT_LAYOUT = "auto"
-PROJECTS_CONFIG = ROOT / "config" / "projects.json"
-VALID_LAYOUTS = {"tiled", "even-horizontal", "even-vertical", "main-horizontal", "main-vertical"}
-LAYOUT_CHOICES = sorted(VALID_LAYOUTS | {"auto"})
-DEFAULT_LIMIT = 6
-ERROR_MARKERS = (
-    "elifecycle",
-    "command failed",
-    "exited (1)",
-    "npm err!",
-    "traceback",
-    "exception",
-    "fatal",
-    "zsh: command not found",
-    "err_pnpm_recursive_run_first_fail",
-)
-MISSING_COMMAND_PATTERN = re.compile(r"command not found:\s*([a-z0-9._/+:-]+)")
-PORT_IN_USE_PATTERN = re.compile(r"port\s+(\d+)\s+is\s+in\s+use")
-HOOK_EVENTS = ("after-split-window", "after-new-window", "client-session-changed")
+# Re-export mutable module-level state from aw.core so that rail and run_*
+# functions can modify dicts/lists by reference (mutations propagate).
+# Scalar globals (_campfire_frame) were converted to single-element lists in
+# aw.core, so mutations via _core._campfire_frame[0] also propagate.
 
-# --- Sound system (Phase 8) ---
-SOUND_COOLDOWN: dict[str, float] = {}  # key → last play time
-SOUND_COOLDOWN_SEC = 10  # minimum seconds between sounds per key
 
-
-def _sounds_enabled() -> bool:
-    """Check if sounds are enabled. Off by default."""
-    if os.environ.get("AW_SOUNDS", "").strip() in ("1", "true", "yes"):
-        return True
-    try:
-        store = load_store()
-        return bool(store.get("sounds", False))
-    except Exception:
-        return False
-
-
-def play_sound(name: str, volume: float = 0.5, key: str = "") -> None:
-    """Play a macOS system sound non-blocking. Silently does nothing if unavailable."""
-    if not _sounds_enabled():
-        return
-    if key:
-        now = time.time()
-        if now - SOUND_COOLDOWN.get(key, 0) < SOUND_COOLDOWN_SEC:
-            return
-        SOUND_COOLDOWN[key] = now
-    path = Path(f"/System/Library/Sounds/{name}.aiff")
-    if path.exists():
-        try:
-            subprocess.Popen(
-                ["afplay", "-v", str(volume), str(path)],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except FileNotFoundError:
-            pass
-
-
-# --- Health history for sparklines (Phase 2) ---
-_health_history: dict[str, list[int]] = {}  # project_id → last N health values
-_prev_rail_health: dict[str, str] = {}  # project_id → previous health level
-_prev_rail_costs: dict[str, float] = {}  # project_id → previous cost
-_sparkle_countdown: dict[str, int] = {}  # project_id → frames remaining for ✦
-_transition_state: dict[str, list[str]] = {}  # project_id → color transition queue
-_campfire_frame: int = 0  # flickering campfire frame counter
-_prev_activity_state: dict[str, dict[str, Any]] = {}  # project_id -> last logged state
-_last_active_time: dict[str, float] = {}  # project_id -> timestamp when last seen green
-_STALL_THRESHOLD_MIN = 10  # minutes of waiting after being active = stalled
-
-
-@dataclass
-class TmuxPane:
-    pane_id: str
-    pane_index: int
-    pane_active: bool
-    project_id: str
-    pane_title: str
-    pane_command: str
-    pane_pid: int
-    pane_tty: str
-    pane_path: str
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def run(cmd: list[str], timeout: int = 10) -> tuple[int, str, str]:
-    try:
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError) as exc:
-        return 1, "", str(exc)
-    return proc.returncode, proc.stdout, proc.stderr
-
-
-def tmux(args: list[str], timeout: int = 10) -> tuple[int, str, str]:
-    for attempt in range(2):
-        code, out, err = run(["tmux", *args], timeout=timeout)
-        if code == 0:
-            return code, out, err
-        if "server exited unexpectedly" in (err or "").lower() and attempt == 0:
-            time.sleep(0.15)
-            continue
-        return code, out, err
-    return 1, "", "tmux command failed"
-
-
-def ensure_tmux() -> None:
-    if shutil.which("tmux"):
-        return
-    raise ValueError("tmux is not installed. Install with: brew install tmux")
-
-
-def default_store() -> dict[str, Any]:
-    return {
-        "default_session": DEFAULT_SESSION,
-        "default_layout": DEFAULT_LAYOUT,
-        "default_projects": [],
-        "persistence": {
-            "enabled": False,
-            "autosave_minutes": 15,
-            "last_snapshot": "",
-        },
-        "profiles": {
-            "current": "default",
-            "items": {
-                "default": {
-                    "managed_sessions": [],
-                    "max_panes": 10,
-                }
-            },
-        },
-        "updated_at": now_iso(),
-    }
-
-
-def _normalize_store(data: dict[str, Any] | None) -> dict[str, Any]:
-    base = default_store()
-    current = data if isinstance(data, dict) else {}
-    merged = {
-        **base,
-        **current,
-    }
-    persistence = current.get("persistence", {}) if isinstance(current.get("persistence"), dict) else {}
-    merged["persistence"] = {
-        "enabled": bool(persistence.get("enabled", base.get("persistence", {}).get("enabled", False))),
-        "autosave_minutes": int(persistence.get("autosave_minutes", base.get("persistence", {}).get("autosave_minutes", 15))),
-        "last_snapshot": str(persistence.get("last_snapshot", base.get("persistence", {}).get("last_snapshot", ""))),
-    }
-    profiles = current.get("profiles", {}) if isinstance(current.get("profiles"), dict) else {}
-    profile_items = profiles.get("items", {}) if isinstance(profiles.get("items"), dict) else {}
-    normalized_items: dict[str, dict[str, Any]] = {}
-    for key, value in profile_items.items():
-        if not isinstance(value, dict):
-            continue
-        name = str(key).strip()
-        if not name:
-            continue
-        managed_sessions = value.get("managed_sessions", [])
-        if not isinstance(managed_sessions, list):
-            managed_sessions = []
-        normalized_items[name] = {
-            "managed_sessions": [str(item).strip() for item in managed_sessions if str(item).strip()],
-            "max_panes": int(value.get("max_panes", 10) or 10),
-        }
-    if "default" not in normalized_items:
-        normalized_items["default"] = {"managed_sessions": [], "max_panes": 10}
-    current_profile = str(profiles.get("current") or "default").strip() or "default"
-    if current_profile not in normalized_items:
-        current_profile = "default"
-    merged["profiles"] = {
-        "current": current_profile,
-        "items": normalized_items,
-    }
-    return merged
-
-
-def load_store() -> dict[str, Any]:
-    if not CONFIG_PATH.exists():
-        return default_store()
-    try:
-        parsed = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return default_store()
-    return _normalize_store(parsed)
-
-
-def save_store(store: dict[str, Any]) -> None:
-    normalized = _normalize_store(store)
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    normalized["updated_at"] = now_iso()
-    CONFIG_PATH.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
-
-
-def sanitize_snapshot_name(name: str) -> str:
-    raw = (name or "").strip()
-    if not raw:
-        raw = "snapshot"
-    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-.")
-    if not safe:
-        safe = "snapshot"
-    if not safe.endswith(".json"):
-        safe += ".json"
-    return safe
-
-
-def persistence_snapshot_path(name: str) -> Path:
-    return PERSISTENCE_DIR / sanitize_snapshot_name(name)
-
-
-def session_window_layout(session: str) -> str:
-    code, out, err = tmux(["list-windows", "-t", f"{session}:0", "-F", "#{window_layout}"], timeout=5)
-    if code != 0:
-        raise ValueError(err.strip() or f"failed to read window layout for session '{session}'")
-    first = out.splitlines()[0].strip() if out else ""
-    return first or "tiled"
-
-
-def tmux_resurrect_scripts() -> tuple[Path, Path]:
-    base = Path.home() / ".tmux" / "plugins" / "tmux-resurrect" / "scripts"
-    return (base / "save.sh", base / "restore.sh")
-
-
-def load_projects_config() -> dict[str, Any]:
-    """Load projects.json. Returns empty config if file doesn't exist."""
-    if not PROJECTS_CONFIG.exists():
-        return {"projects": []}
-    try:
-        return json.loads(PROJECTS_CONFIG.read_text(encoding="utf-8"))
-    except Exception:
-        return {"projects": []}
-
-
-def project_map() -> dict[str, dict[str, Any]]:
-    config = load_projects_config()
-    projects = config.get("projects", [])
-    return {project["id"]: project for project in projects}
-
-
-def infer_project_id_from_path(path: str, proj_map: dict[str, dict[str, Any]]) -> str | None:
-    path_norm = os.path.abspath(path or "")
-    if not path_norm:
-        return None
-    matches: list[tuple[int, str]] = []
-    for project_id, project in proj_map.items():
-        project_path = str(project.get("path") or "")
-        if not project_path:
-            continue
-        project_norm = os.path.abspath(project_path)
-        if path_norm == project_norm or path_norm.startswith(project_norm + os.sep):
-            matches.append((len(project_norm), project_id))
-    if not matches:
-        return None
-    matches.sort(reverse=True)
-    return matches[0][1]
-
-
-def split_csv(value: str | None) -> list[str]:
-    if not value:
-        return []
-    return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def choose_projects(
-    projects_value: str | None,
-    limit: int,
-    group: str | None,
-) -> list[str]:
-    proj_map = project_map()
-    explicit = split_csv(projects_value)
-    if explicit:
-        missing = [project_id for project_id in explicit if project_id not in proj_map]
-        if missing:
-            known = ", ".join(sorted(proj_map.keys()))
-            raise ValueError(f"Unknown project id(s): {', '.join(missing)}. Known: {known}")
-        return explicit
-
-    selected: list[str] = []
-    for project in load_projects_config().get("projects", []):
-        if project.get("barn"):
-            continue  # In the barn — skip unless explicitly requested
-        if group and str(project.get("group", "")).lower() != group.lower():
-            continue
-        selected.append(project["id"])
-        if len(selected) >= max(1, limit):
-            break
-    if not selected:
-        raise ValueError("No projects selected. Pass --projects id1,id2 or use --group with matching projects.")
-    return selected
-
-
-def choose_layout(layout: str | None, pane_count: int) -> str:
-    requested = (layout or DEFAULT_LAYOUT).strip().lower()
-    if requested != "auto":
-        if requested not in VALID_LAYOUTS:
-            known = ", ".join(sorted(VALID_LAYOUTS))
-            raise ValueError(f"Invalid layout '{requested}'. Use one of: auto, {known}")
-        return requested
-
-    if pane_count <= 2:
-        return "even-horizontal"
-    if pane_count <= 4:
-        return "tiled"
-    if pane_count <= 6:
-        return "main-vertical"
-    if pane_count <= 9:
-        return "tiled"
-    return "even-vertical"
-
-
-def process_cwd(pid: int) -> str | None:
-    if pid <= 0:
-        return None
-    code, out, _ = run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], timeout=5)
-    if code != 0 or not out:
-        return None
-    for line in out.splitlines():
-        if line.startswith("n"):
-            value = line[1:].strip()
-            if value:
-                return value
-    return None
-
-
-def infer_project_id_from_command(command: str, proj_map: dict[str, dict[str, Any]]) -> str | None:
-    lower = command.lower()
-    matches: list[tuple[int, str]] = []
-    for project_id, project in proj_map.items():
-        project_path = str(project.get("path") or "")
-        if not project_path:
-            continue
-        norm = os.path.abspath(project_path).lower()
-        if norm in lower:
-            matches.append((len(norm), project_id))
-    if not matches:
-        return None
-    matches.sort(reverse=True)
-    return matches[0][1]
-
-
-def infer_project_id_from_session(session: dict[str, Any], proj_map: dict[str, dict[str, Any]]) -> tuple[str | None, str | None]:
-    pid = int(session.get("pid") or 0)
-    cwd = process_cwd(pid)
-    if cwd:
-        # Try matching against known projects first
-        project_id = infer_project_id_from_path(cwd, proj_map)
-        if project_id:
-            return project_id, cwd
-        # No match — use directory basename as project ID (auto-discover)
-        norm_cwd = os.path.abspath(cwd)
-        home = os.path.expanduser("~")
-        if norm_cwd == home or norm_cwd == "/":
-            return None, cwd
-        basename = os.path.basename(norm_cwd)
-        if basename:
-            return basename, cwd
-
-    command = str(session.get("command") or "")
-    project_id = infer_project_id_from_command(command, proj_map)
-    return project_id, cwd
-
-
-def session_exists(session: str) -> bool:
-    code, _, _ = tmux(["has-session", "-t", session], timeout=5)
-    return code == 0
-
-
-def list_tmux_sessions() -> list[str]:
-    code, out, err = tmux(["list-sessions", "-F", "#{session_name}"], timeout=5)
-    if code != 0:
-        msg = (err or "").strip().lower()
-        if "no server running" in msg:
-            return []
-        return []
-    sessions = [line.strip() for line in out.splitlines() if line.strip()]
-    return sorted(set(sessions))
-
-
-
-def pane_format() -> str:
-    return (
-        "#{pane_id}\t#{pane_index}\t#{pane_active}\t#{@project_id}\t#{pane_title}\t#{pane_current_command}\t"
-        "#{pane_pid}\t#{pane_tty}\t#{pane_current_path}"
-    )
-
-
-def list_panes(session: str) -> list[TmuxPane]:
-    code, out, err = tmux(["list-panes", "-t", f"{session}:0", "-F", pane_format()], timeout=10)
-    if code != 0:
-        detail = err.strip() or f"unable to list panes for session '{session}'"
-        raise ValueError(detail)
-
-    panes: list[TmuxPane] = []
-    for raw_line in out.splitlines():
-        parts = raw_line.split("\t")
-        if len(parts) < 9:
-            continue
-        pane_id = parts[0]
-        try:
-            pane_index = int(parts[1])
-        except ValueError:
-            pane_index = 0
-        pane_active = parts[2] == "1"
-        project_id = parts[3]
-        pane_title = parts[4]
-        pane_command = parts[5]
-        try:
-            pane_pid = int(parts[6])
-        except ValueError:
-            pane_pid = 0
-        pane_tty = parts[7]
-        pane_path = parts[8]
-        panes.append(
-            TmuxPane(
-                pane_id=pane_id,
-                pane_index=pane_index,
-                pane_active=pane_active,
-                project_id=project_id,
-                pane_title=pane_title,
-                pane_command=pane_command,
-                pane_pid=pane_pid,
-                pane_tty=pane_tty,
-                pane_path=pane_path,
-            )
-        )
-
-    panes.sort(key=lambda pane: pane.pane_index)
-    return panes
-
-
-def session_monitor_by_tty() -> dict[str, dict[str, Any]]:
-    snapshot, _ = terminal_sentinel.classify_sessions(source_filter="all", include_idle=True)
-    return {str(item.get("tty")): item for item in snapshot.get("sessions", [])}
-
-
-def _build_session_indexes(
-    snapshot: dict[str, Any],
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Build TTY-keyed and path-keyed indexes from sentinel sessions.
-
-    Path index maps normalized absolute paths to AI sessions (Ghostty tabs).
-    When a tmux pane's TTY doesn't match any sentinel session, the path
-    index lets us fall back to matching by project directory.
-    """
-    by_tty: dict[str, dict[str, Any]] = {}
-    by_path: dict[str, dict[str, Any]] = {}
-    for item in snapshot.get("sessions", []):
-        tty = str(item.get("tty") or "")
-        if tty:
-            by_tty[tty] = item
-        cwd = item.get("cwd")
-        if cwd and item.get("kind") == "ai":
-            norm = os.path.normpath(cwd)
-            # First match wins (sessions are sorted by status priority)
-            if norm not in by_path:
-                by_path[norm] = item
-    return by_tty, by_path
-
-
-def _resolve_monitor(
-    tty_short: str,
-    pane_path: str,
-    by_tty: dict[str, dict[str, Any]],
-    by_path: dict[str, dict[str, Any]],
-) -> dict[str, Any]:
-    """Find the best sentinel session for a pane: TTY match first, then path.
-
-    Path fallback matches Ghostty AI sessions by directory. When a match comes
-    from path (not TTY), it's flagged as 'path_match' so health detection knows
-    to trust the sentinel's status instead of scanning the tmux pane scrollback.
-    """
-    monitor = by_tty.get(tty_short)
-    if monitor and monitor.get("agent"):
-        return monitor
-    # Fallback: match Ghostty AI session by project directory
-    if pane_path:
-        norm = os.path.normpath(pane_path)
-        path_match = by_path.get(norm)
-        if path_match:
-            result = dict(path_match)
-            result["path_match"] = True
-            return result
-    return monitor or {}
-
-
-def capture_pane_text(pane_id: str, lines: int) -> str:
-    code, out, _ = tmux(["capture-pane", "-p", "-t", pane_id, "-S", f"-{max(5, lines)}"], timeout=8)
-    if code != 0:
-        return ""
-    return out.lower()
-
-
-def capture_pane_raw(pane_id: str, lines: int) -> str:
-    """Capture pane text without lowercasing (needed for status bar parsing)."""
-    code, out, _ = tmux(["capture-pane", "-p", "-t", pane_id, "-S", f"-{max(5, lines)}"], timeout=8)
-    if code != 0:
-        return ""
-    return out
-
-
-def batch_set_pane_options(pane_id: str, options: list[tuple[str, str]]) -> None:
-    """Set multiple pane options in a single tmux command using \\; separators."""
-    if not options:
-        return
-    args: list[str] = []
-    for key, value in options:
-        if args:
-            args.append(";")
-        args.extend(["set-option", "-p", "-t", pane_id, key, value])
-    tmux(args, timeout=8)
-
-
-# ── Claude Code status bar parser ──────────────────────────────────
-# Parses the native status line rendered at the bottom of Claude Code sessions:
-#   Opus 4.6 | ●●●●○○○○○○ 86k/200k (42%) | ~$2.93
-#   5hr ○○○○○○○○○○ 2% in 3h 33m | 7d ●●●○○○○○○○ 39% in 1d 15h | extra $0.00/$50
-
-_CC_MODEL_RE = re.compile(
-    r"((?:Opus|Sonnet|Haiku)\s+[\d.]+)"
-    r"\s*\|.*?(\d+)k?/(\d+)k\s*\((\d+)%\)"
-    r"\s*\|.*?~?\$?([\d.]+)"
-)
-_CC_RATE_RE = re.compile(r"(\d+(?:hr|d))\s+[●○]+\s+(\d+)%")
-
-
-def _parse_claude_status_from_text(raw: str) -> dict[str, Any] | None:
-    """Parse Claude Code status bar from already-captured pane text."""
-    if not raw:
-        return None
-
-    lines = [ln for ln in raw.splitlines() if ln.strip()]
-    if len(lines) < 2:
-        return None
-
-    # Search the last 8 non-empty lines for the model line
-    tail = lines[-8:]
-    result: dict[str, Any] = {}
-
-    for line in tail:
-        m = _CC_MODEL_RE.search(line)
-        if m:
-            result["model"] = m.group(1)
-            result["tokens_k"] = int(m.group(2))
-            result["tokens_max_k"] = int(m.group(3))
-            result["context_pct"] = int(m.group(4))
-            result["cost"] = float(m.group(5))
-
-        for rm in _CC_RATE_RE.finditer(line):
-            window = rm.group(1)
-            pct = int(rm.group(2))
-            result[f"rate_{window}"] = pct
-
-    return result if result else None
-
-
-def parse_claude_status(pane_id: str) -> dict[str, Any] | None:
-    """Scrape Claude Code's status bar from the bottom of a pane."""
-    raw = capture_pane_raw(pane_id, lines=8)
-    return _parse_claude_status_from_text(raw)
-
-
-def detect_error_marker(text: str) -> str | None:
-    if not text:
-        return None
-    for marker in ERROR_MARKERS:
-        if marker in text:
-            return marker
-    return None
-
-
-def detect_missing_command(text: str) -> str | None:
-    if not text:
-        return None
-    match = MISSING_COMMAND_PATTERN.search(text)
-    if not match:
-        return None
-    value = match.group(1).strip()
-    return value or None
-
-
-def detect_port_in_use(text: str) -> str | None:
-    if not text:
-        return None
-    match = PORT_IN_USE_PATTERN.search(text)
-    if not match:
-        return None
-    return match.group(1).strip() or None
-
-
-def detect_prompt_waiting(raw_text: str, agent: str) -> bool:
-    """Detect if an AI agent is at its input prompt by scanning pane text.
-
-    CPU-based detection doesn't work for AI tools because the thinking
-    happens on remote servers — local CPU is near-zero even when active.
-    Instead, look for the tool's prompt character in the last few lines.
-    """
-    if not raw_text or not agent:
-        return False
-    # Get last non-empty lines (skip status bar area at very bottom)
-    lines = [ln for ln in raw_text.splitlines() if ln.strip()]
-    if not lines:
-        return False
-    # Check last ~10 meaningful lines for prompt patterns
-    tail = lines[-10:]
-    for line in reversed(tail):
-        stripped = line.strip()
-        # Skip Claude Code status bar lines
-        if any(k in stripped for k in ("Opus ", "Sonnet ", "Haiku ", "○○", "●●", "bypass permissions", "extra $")):
-            continue
-        # Skip separator lines
-        if stripped and all(c in "─━═—-" for c in stripped):
-            continue
-        # Claude Code prompt: ❯ or > at the start of a line (possibly with spaces)
-        if agent == "claude" and stripped in ("❯", ">", "❯ "):
-            return True
-        # Codex / Gemini CLI prompt
-        if agent in ("codex", "gemini") and stripped in (">", "❯"):
-            return True
-        # If we hit a non-status, non-separator, non-prompt line, it's output
-        return False
-    return False
-
-
-def pane_health_level(
-    monitor: dict[str, Any],
-    error_marker: str | None,
-    wait_attention_min: int,
-    prompt_waiting: bool = False,
-) -> tuple[str, bool, str]:
-    status = str(monitor.get("status") or "idle")
-    agent = str(monitor.get("agent") or "")
-    wait = monitor.get("waiting_minutes")
-    is_path_match = bool(monitor.get("path_match"))
-
-    if error_marker:
-        return "red", True, f"error: {error_marker}"
-
-    if agent and agent != "-":
-        if is_path_match:
-            # Agent matched by directory (e.g. Ghostty running Claude for this
-            # project). Trust the sentinel's status — the tmux pane scrollback
-            # belongs to a shell, not the agent.
-            if status == "active":
-                return "green", False, ""
-            if status == "waiting":
-                return "yellow", False, ""
-            return "yellow", False, status
-        else:
-            # Agent matched by TTY — it's running in this pane directly.
-            # Use scrollback-based detection: prompt visible = waiting,
-            # no prompt = generating (CPU-based detection doesn't work
-            # because AI tools think on remote servers).
-            if prompt_waiting:
-                return "yellow", False, ""
-            else:
-                return "green", False, ""
-
-    if status == "background":
-        return "yellow", False, "background"
-    # No agent running — pane is idle at a shell prompt
-    if status in {"active", "idle"}:
-        return "yellow", False, "no agent"
-    return "yellow", False, status
-
-
-def style_for_level(level: str) -> tuple[str, str]:
-    """Return (inactive_border_style, active_border_style) for a health level.
-
-    Health is encoded via border color (hue). Active pane gets warm gold
-    border — lit up like it's near the campfire.
-    """
-    if level == "red":
-        return "fg=colour88", "fg=colour214,bold"
-    if level == "yellow":
-        return "fg=colour130", "fg=colour214,bold"
-    return "fg=colour22", "fg=colour214,bold"
-
-
-def set_window_orchestrator_format(session: str) -> None:
-    """Apply pane border format, indicators, and inactive dimming.
-
-    All calls are idempotent set-option — safe to call on every refresh.
-    """
-    target = f"{session}:0"
-    tmux(["set-option", "-w", "-t", target, "pane-border-status", "top"], timeout=5)
-    tmux(["set-option", "-w", "-t", target, "pane-border-lines", "single"], timeout=5)
-    tmux(["set-option", "-w", "-t", target, "pane-border-indicators", "both"], timeout=5)
-    tmux(["set-option", "-w", "-t", target, "window-style", "fg=colour245,bg=colour234"], timeout=5)
-    tmux(["set-option", "-w", "-t", target, "window-active-style", "fg=default,bg=default"], timeout=5)
-    # Border format: active marker (▶) + health dot + project + ranch status
-    fmt = (
-        "#{?pane_active,#[fg=colour214 bold]▶ ,  }"
-        "#{?#{==:#{@health},RED},#[fg=colour196]● ,"
-        "#{?#{==:#{@health},YELLOW},#[fg=colour220]● ,"
-        "#[fg=colour34]● }}"
-        "#[fg=colour250]#{@project_id}"
-        " #[fg=colour240]· "
-        "#{?#{==:#{@health},RED},#[fg=colour196]down#{?@health_reason,: #{@health_reason},},"
-        "#{?#{==:#{@health},YELLOW},#[fg=colour220]at fence#{?@health_reason, #{@health_reason},},"
-        "#[fg=colour34]grazing}}"
-        "#[default]"
-    )
-    tmux(["set-option", "-w", "-t", target, "pane-border-format", fmt], timeout=5)
-    # Status bar: ranch-branded left + herd tally right
-    tmux(["set-option", "-t", session, "status-style", "bg=colour235,fg=colour250"], timeout=5)
-    tmux(["set-option", "-t", session, "status-left",
-          " #[fg=colour130 bold]AW#[default] #[fg=colour172]⟨#[default] "
-          "#[fg=colour250]#{session_name}#[default] #[fg=colour172]⟩#[default] "], timeout=5)
-    tmux(["set-option", "-t", session, "status-left-length", "30"], timeout=5)
-    tmux(["set-option", "-t", session, "status-right",
-          "#{?window_zoomed_flag,#[fg=colour208 bold] ◎ ZOOMED #[default],} "
-          "#[fg=colour250]%H:%M#[default] "], timeout=5)
-    tmux(["set-option", "-t", session, "status-right-length", "120"], timeout=5)
-
-
-_WINDOW_FORMAT_APPLIED: set[str] = set()
-
-
-def refresh_pane_health(
-    session: str,
-    capture_lines: int,
-    wait_attention_min: int,
-    apply_colors: bool = True,
-) -> list[dict[str, Any]]:
-    panes = list_panes(session)
-    snapshot, _ = terminal_sentinel.classify_sessions(source_filter="all", include_idle=True)
-    by_tty, by_path = _build_session_indexes(snapshot)
-    rows: list[dict[str, Any]] = []
-
-    # Window format only needs to be set once per session, not every refresh
-    if apply_colors and session not in _WINDOW_FORMAT_APPLIED:
-        set_window_orchestrator_format(session)
-        _WINDOW_FORMAT_APPLIED.add(session)
-
-    for pane in panes:
-        tty_short = pane.pane_tty.split("/")[-1]
-        monitor = _resolve_monitor(tty_short, pane.pane_path, by_tty, by_path)
-        agent = str(monitor.get("agent") or "-")
-        status = str(monitor.get("status") or "idle")
-        wait = monitor.get("waiting_minutes")
-
-        # Single capture per pane — use raw text for both health detection and status bar
-        raw_text = capture_pane_raw(pane.pane_id, lines=capture_lines)
-        pane_text = raw_text.lower()
-        error_marker = detect_error_marker(pane_text)
-        missing_command = detect_missing_command(pane_text)
-        port_in_use = detect_port_in_use(pane_text)
-        prompt_waiting = detect_prompt_waiting(raw_text, agent)
-        level, needs_attention, reason = pane_health_level(
-            monitor=monitor,
-            error_marker=error_marker,
-            wait_attention_min=wait_attention_min,
-            prompt_waiting=prompt_waiting,
-        )
-        if reason.startswith("error: zsh: command not found") and missing_command:
-            reason = f"missing command: {missing_command}"
-        elif port_in_use and not reason.startswith("error:"):
-            reason = f"port in use: {port_in_use}"
-
-        # Parse Claude Code status bar from the already-captured raw text
-        cc_stats = None
-        if agent == "claude":
-            cc_stats = _parse_claude_status_from_text(raw_text)
-
-        if apply_colors:
-            # Batch all pane options into a single tmux command
-            border_style, active_style = style_for_level(level)
-            batch_set_pane_options(pane.pane_id, [
-                ("@agent", agent),
-                ("@health", level.upper()),
-                ("@health_reason", reason),
-                ("@needs_attention", "1" if needs_attention else "0"),
-                ("pane-border-style", border_style),
-                ("pane-active-border-style", active_style),
-            ])
-
-        rows.append(
-            {
-                "pane_id": pane.pane_id,
-                "index": pane.pane_index,
-                "project_id": pane.project_id or "-",
-                "title": pane.pane_title,
-                "tty": tty_short,
-                "agent": agent,
-                "status": status,
-                "wait": (int(wait) if wait is not None else None),
-                "health": level,
-                "needs_attention": needs_attention,
-                "reason": reason,
-                "error_marker": error_marker,
-                "missing_command": missing_command,
-                "port_in_use": port_in_use,
-                "cc_stats": cc_stats,
-            }
-        )
-
-    # Update status bar with ranch-branded herd tally or per-project dots
-    if apply_colors and rows:
-        counts = {"green": 0, "yellow": 0, "red": 0}
-        for row in rows:
-            lev = str(row.get("health") or "green").lower()
-            counts[lev] = counts.get(lev, 0) + 1
-        total = sum(counts.values())
-
-        if total > 6:
-            # Compact herd tally for large grids
-            tally_parts = [f"#[fg=colour172]⟨ {total} head"]
-            if counts["green"]:
-                tally_parts.append(f"#[fg=colour34]{counts['green']}●")
-            if counts["yellow"]:
-                tally_parts.append(f"#[fg=colour220]{counts['yellow']}●")
-            if counts["red"]:
-                tally_parts.append(f"#[fg=colour196]{counts['red']}●")
-            tally_parts.append("#[fg=colour172]⟩")
-            tabs_str = " ".join(tally_parts)
-        else:
-            # Per-project dots for small grids
-            tab_parts = []
-            for row in rows:
-                pid = str(row.get("project_id") or "?")
-                lev = str(row.get("health") or "").lower()
-                if len(pid) > 14:
-                    pid = pid[:13] + "~"
-                dot_color = {"green": "colour34", "yellow": "colour220", "red": "colour196"}.get(lev, "colour250")
-                tab_parts.append(f"#[fg={dot_color}]●#[fg=colour250] {pid}")
-            tabs_str = " #[fg=colour240]│#[default] ".join(tab_parts)
-
-        status_right = (
-            f" {tabs_str} "
-            "#{?window_zoomed_flag,#[fg=colour208 bold] ◎ ZOOMED #[default],}"
-            " #[fg=colour250]%H:%M#[default] "
-        )
-        tmux(["set-option", "-t", session, "status-right", status_right], timeout=3)
-        tmux(["set-option", "-t", session, "status-right-length", "120"], timeout=3)
-
-    # Desktop notifications on health state changes
-    if apply_colors:
-        check_and_notify(rows)
-
-    return rows
-
-
-def apply_layout(session: str, layout: str) -> None:
-    if layout not in VALID_LAYOUTS:
-        known = ", ".join(sorted(VALID_LAYOUTS))
-        raise ValueError(f"Invalid layout '{layout}'. Use one of: {known}")
-    code, _, err = tmux(["select-layout", "-t", f"{session}:0", layout], timeout=5)
-    if code != 0:
-        raise ValueError(err.strip() or f"failed to set layout '{layout}'")
-
-
-def list_pane_sizes(session: str) -> list[tuple[str, int, int]]:
-    code, out, err = tmux(
-        ["list-panes", "-t", f"{session}:0", "-F", "#{pane_id}\t#{pane_width}\t#{pane_height}"],
-        timeout=10,
-    )
-    if code != 0:
-        raise ValueError(err.strip() or f"failed to inspect pane sizes for session '{session}'")
-
-    rows: list[tuple[str, int, int]] = []
-    for line in out.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        pane_id = parts[0]
-        try:
-            width = int(parts[1])
-            height = int(parts[2])
-        except ValueError:
-            continue
-        rows.append((pane_id, width, height))
-    return rows
-
-
-def split_for_path(session: str, path: str) -> None:
-    sizes = list_pane_sizes(session)
-    if not sizes:
-        raise ValueError(f"no panes found in session '{session}'")
-
-    target, width, height = max(sizes, key=lambda item: item[1] * item[2])
-    orientation = "-h" if width >= height else "-v"
-
-    code, _, err = tmux(["split-window", orientation, "-d", "-t", target, "-c", path], timeout=8)
-    if code == 0:
-        return
-
-    other = "-v" if orientation == "-h" else "-h"
-    code, _, err = tmux(["split-window", other, "-d", "-t", target, "-c", path], timeout=8)
-    if code == 0:
-        return
-
-    code, _, err2 = tmux(["split-window", "-d", "-t", f"{session}:0", "-c", path], timeout=8)
-    if code == 0:
-        return
-    detail = (err2 or err or "").strip()
-    raise ValueError(detail or f"failed creating pane for path '{path}'")
-
-
-def pane_target(session: str, token: str) -> TmuxPane:
-    panes = list_panes(session)
-    if not panes:
-        raise ValueError("No panes found")
-
-    value = token.strip()
-    for pane in panes:
-        if pane.pane_id == value:
-            return pane
-
-    if value.isdigit():
-        index = int(value)
-        for pane in panes:
-            if pane.pane_index == index:
-                return pane
-
-    lower = value.lower()
-    for pane in panes:
-        if pane.project_id and pane.project_id.lower() == lower:
-            return pane
-    for pane in panes:
-        if pane.pane_title.lower() == lower:
-            return pane
-
-    for pane in panes:
-        if lower in pane.pane_title.lower() or (pane.project_id and lower in pane.project_id.lower()):
-            return pane
-    for pane in panes:
-        if lower in pane.pane_path.lower():
-            return pane
-
-    raise ValueError(f"Pane not found: {token}")
-
-
-def pane_send(pane_id: str, command: str, enter: bool = True) -> None:
-    args = ["send-keys", "-t", pane_id, command]
-    if enter:
-        args.append("C-m")
-    code, _, err = tmux(args, timeout=5)
-    if code != 0:
-        raise ValueError(err.strip() or f"failed to send keys to {pane_id}")
-
-
-def pane_set_project_id(pane_id: str, project_id: str) -> None:
-    code, _, err = tmux(["set-option", "-p", "-t", pane_id, "@project_id", project_id], timeout=5)
-    if code != 0:
-        raise ValueError(err.strip() or f"failed to set project id for {pane_id}")
-
-
-def pane_ctrl_c(pane_id: str) -> None:
-    code, _, err = tmux(["send-keys", "-t", pane_id, "C-c"], timeout=5)
-    if code != 0:
-        raise ValueError(err.strip() or f"failed to send Ctrl-C to {pane_id}")
-
-
-# ── Hide / Show pane toggling ─────────────────────────────────────
-HIDDEN_PREFIX = "_hid_"
-
-
-def hide_pane(session: str, pane_id: str, project_id: str) -> str:
-    """Move a pane to a hidden background window. Agent keeps running.
-
-    Returns the hidden window name.
-    """
-    hidden_name = f"{HIDDEN_PREFIX}{project_id}"
-    # break-pane moves the pane to its own new window, -d stays in current window
-    code, _, err = tmux(["break-pane", "-d", "-s", pane_id, "-n", hidden_name], timeout=8)
-    if code != 0:
-        raise ValueError(err.strip() or f"failed to hide pane {pane_id}")
-    # Rebalance the grid after removing a pane
-    try:
-        apply_layout(session, "tiled")
-    except ValueError:
-        pass  # May fail if grid is now empty
-    return hidden_name
-
-
-def show_pane(session: str, hidden_window: str) -> None:
-    """Bring a hidden pane back to the grid window."""
-    # join-pane moves the pane from hidden window into the grid window
-    grid_target = f"{session}:grid"
-    source = f"{hidden_window}.0"
-    code, _, err = tmux(["join-pane", "-d", "-s", source, "-t", grid_target], timeout=8)
-    if code != 0:
-        raise ValueError(err.strip() or f"failed to show pane from {hidden_window}")
-    # Rebalance
-    try:
-        apply_layout(session, "tiled")
-    except ValueError:
-        pass
-
-
-def list_hidden_panes(session: str) -> list[dict[str, Any]]:
-    """List all hidden panes (windows with _hid_ prefix) in the session."""
-    code, out, _ = tmux(
-        ["list-windows", "-t", session, "-F", "#{window_name}\t#{window_id}\t#{pane_id}\t#{pane_tty}\t#{pane_current_path}"],
-        timeout=5,
-    )
-    if code != 0:
-        return []
-
-    hidden: list[dict[str, Any]] = []
-    snapshot, _ = terminal_sentinel.classify_sessions(source_filter="all", include_idle=True)
-    by_tty, by_path = _build_session_indexes(snapshot)
-    for line in out.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 5:
-            continue
-        name, window_id, pane_id, tty, path = parts[0], parts[1], parts[2], parts[3], parts[4]
-        if not name.startswith(HIDDEN_PREFIX):
-            continue
-        project_id = name[len(HIDDEN_PREFIX):]
-        tty_short = tty.split("/")[-1]
-        monitor = _resolve_monitor(tty_short, path, by_tty, by_path)
-        hidden.append({
-            "window_name": name,
-            "window_id": window_id,
-            "pane_id": pane_id,
-            "project_id": project_id,
-            "path": path,
-            "agent": str(monitor.get("agent") or "-"),
-            "status": str(monitor.get("status") or "idle"),
-        })
-    return hidden
-
-
-def attach_session(session: str) -> int:
-    if not sys.stdout.isatty():
-        # Not a terminal (e.g. subprocess call) — skip attach silently
-        return 0
-    if os.environ.get("TMUX"):
-        # Already inside tmux — switch to the target session instead of attaching
-        proc = subprocess.run(
-            ["tmux", "switch-client", "-t", session],
-            stdin=subprocess.DEVNULL, check=False,
-        )
-        return int(proc.returncode)
-    proc = subprocess.run(["tmux", "attach-session", "-t", session], check=False)
-    return int(proc.returncode)
-
-
-def print_panes(session: str, panes: list[TmuxPane]) -> None:
-    snapshot, _ = terminal_sentinel.classify_sessions(source_filter="all", include_idle=True)
-    by_tty, by_path = _build_session_indexes(snapshot)
-
-    print(f"Session: {session}  panes={len(panes)}")
-    print(
-        f"{'IDX':<4} {'PANE':<6} {'PROJECT':<22} {'TITLE':<24} {'AGENT':<8} {'STATUS':<10} "
-        f"{'CMD':<10} {'TTY':<10} PATH"
-    )
-    for pane in panes:
-        tty_short = pane.pane_tty.split("/")[-1]
-        monitor = _resolve_monitor(tty_short, pane.pane_path, by_tty, by_path)
-        agent = str(monitor.get("agent") or "-")
-        status = str(monitor.get("status") or "-")
-        marker = "*" if pane.pane_active else " "
-        project = (pane.project_id or "-")[:22]
-        title = pane.pane_title[:24]
-        path = pane.pane_path
-        print(
-            f"{pane.pane_index:<4} {pane.pane_id:<6} {project:<22} {marker}{title:<23} {agent:<8} {status:<10} "
-            f"{pane.pane_command:<10} {tty_short:<10} {path}"
-        )
-
-
-def backfill_pane_project_ids(session: str, panes: list[TmuxPane], proj_map: dict[str, dict[str, Any]]) -> list[TmuxPane]:
-    changed = False
-    for pane in panes:
-        if pane.project_id:
-            continue
-        inferred = infer_project_id_from_path(pane.pane_path, proj_map)
-        if not inferred:
-            continue
-        pane_set_project_id(pane.pane_id, inferred)
-        pane.project_id = inferred
-        changed = True
-    if changed:
-        return list_panes(session)
-    return panes
-
-
-def session_health_summary(
-    *,
-    session: str,
-    capture_lines: int,
-    wait_attention_min: int,
-) -> dict[str, Any]:
-    rows = refresh_pane_health(
-        session=session,
-        capture_lines=capture_lines,
-        wait_attention_min=wait_attention_min,
-    )
-    counts = {
-        "red": 0,
-        "yellow": 0,
-        "green": 0,
-    }
-    for row in rows:
-        level = str(row.get("health") or "").lower()
-        if level in counts:
-            counts[level] += 1
-    attention = len([row for row in rows if row.get("needs_attention")])
-    waiting = len([row for row in rows if str(row.get("status")) == "waiting"])
-    active = len([row for row in rows if str(row.get("status")) == "active"])
-    top_reason = "-"
-    for row in rows:
-        if row.get("needs_attention"):
-            top_reason = str(row.get("reason") or "-")
-            break
-    if top_reason == "-" and rows:
-        top_reason = str(rows[0].get("reason") or "-")
-    return {
-        "session": session,
-        "rows": rows,
-        "panes": len(rows),
-        "attention": attention,
-        "waiting": waiting,
-        "active": active,
-        "red": counts["red"],
-        "yellow": counts["yellow"],
-        "green": counts["green"],
-        "top_reason": top_reason,
-        "ok": True,
-    }
-
-
-def git_project_snapshot(path: str) -> dict[str, Any] | None:
-    if not path:
-        return None
-    code, out, _ = run(["git", "-C", path, "rev-parse", "--is-inside-work-tree"], timeout=5)
-    if code != 0 or out.strip() != "true":
-        return None
-
-    code, branch, _ = run(["git", "-C", path, "symbolic-ref", "--quiet", "--short", "HEAD"], timeout=5)
-    if code != 0:
-        code2, detached, _ = run(["git", "-C", path, "rev-parse", "--short", "HEAD"], timeout=5)
-        branch_name = detached.strip() if code2 == 0 and detached.strip() else "detached"
-    else:
-        branch_name = branch.strip() or "-"
-
-    code, status_out, _ = run(["git", "-C", path, "status", "--porcelain"], timeout=8)
-    dirty = 0
-    staged = 0
-    unstaged = 0
-    untracked = 0
-    if code == 0 and status_out:
-        for line in status_out.splitlines():
-            if not line:
-                continue
-            dirty += 1
-            if line.startswith("??"):
-                untracked += 1
-                continue
-            if len(line) >= 2:
-                if line[0] not in {" ", "?"}:
-                    staged += 1
-                if line[1] not in {" ", "?"}:
-                    unstaged += 1
-
-    ahead = 0
-    behind = 0
-    code, upstream, _ = run(["git", "-C", path, "rev-parse", "--abbrev-ref", "@{upstream}"], timeout=5)
-    if code == 0 and upstream.strip():
-        code2, counts, _ = run(
-            ["git", "-C", path, "rev-list", "--left-right", "--count", f"{upstream.strip()}...HEAD"],
-            timeout=5,
-        )
-        if code2 == 0:
-            parts = counts.strip().split()
-            if len(parts) == 2:
-                try:
-                    behind = int(parts[0])
-                    ahead = int(parts[1])
-                except ValueError:
-                    ahead = 0
-                    behind = 0
-
-    return {
-        "path": path,
-        "branch": branch_name,
-        "dirty": dirty,
-        "staged": staged,
-        "unstaged": unstaged,
-        "untracked": untracked,
-        "ahead": ahead,
-        "behind": behind,
-    }
-
-
-def project_rows_for_session(session: str, proj_map: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    panes = backfill_pane_project_ids(session, list_panes(session), proj_map)
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for pane in panes:
-        project_id = pane.project_id or infer_project_id_from_path(pane.pane_path, proj_map) or "-"
-        if project_id in seen:
-            continue
-        seen.add(project_id)
-        project = proj_map.get(project_id, {})
-        path = str(project.get("path") or pane.pane_path or "")
-        git = git_project_snapshot(path)
-        rows.append(
-            {
-                "project_id": project_id,
-                "path": path,
-                "git": git,
-            }
-        )
-
-    rows.sort(key=lambda item: str(item.get("project_id") or ""))
-    return rows
-
-
-def create_grid_session(
-    *,
-    session: str,
-    layout: str | None,
-    project_ids: list[str],
-    proj_map: dict[str, dict[str, Any]],
-    project_overrides: dict[str, dict[str, Any]] | None,
-    no_startup: bool,
-    agent_default: str | None,
-    agent_by_project: dict[str, str] | None,
-    force: bool,
-) -> tuple[str, list[TmuxPane]]:
-    if session_exists(session):
-        if force:
-            code, _, err = tmux(["kill-session", "-t", session], timeout=5)
-            if code != 0:
-                raise ValueError(err.strip() or f"failed to replace existing session '{session}'")
-        else:
-            raise ValueError(f"Session '{session}' already exists. Use --force to replace it.")
-
-    if not project_ids:
-        raise ValueError("No projects to create panes for.")
-
-    merged_map = dict(proj_map)
-    if project_overrides:
-        merged_map.update(project_overrides)
-
-    first = merged_map.get(project_ids[0], {})
-    first_path = str(first.get("path") or "")
-    if not first_path:
-        raise ValueError(f"Project '{project_ids[0]}' has no path")
-
-    code, _, err = tmux(
-        ["new-session", "-d", "-s", session, "-n", "grid", "-x", "260", "-y", "90", "-c", first_path],
-        timeout=8,
-    )
-    if code != 0:
-        raise ValueError(err.strip() or f"failed to create session '{session}'")
-
-    for project_id in project_ids[1:]:
-        project = merged_map.get(project_id, {})
-        path = str(project.get("path") or "")
-        if not path:
-            raise ValueError(f"Project '{project_id}' has no path")
-        split_for_path(session, path)
-        # Rebalance as the grid grows to prevent "no space for new pane" on repeated splits.
-        apply_layout(session, "tiled")
-
-    resolved_layout = choose_layout(layout, pane_count=len(project_ids))
-    apply_layout(session, resolved_layout)
-
-    panes = list_panes(session)
-    for idx, pane in enumerate(panes):
-        project_id = project_ids[idx] if idx < len(project_ids) else f"pane-{idx}"
-        project = merged_map.get(project_id, {})
-
-        pane_set_project_id(pane.pane_id, project_id)
-        code, _, err = tmux(["select-pane", "-t", pane.pane_id, "-T", project_id], timeout=5)
-        if code != 0:
-            raise ValueError(err.strip() or f"failed to set pane title for {pane.pane_id}")
-
-        # Show project context without clearing — preserves shell state
-        pane_send(pane.pane_id, f"echo '\\n  [{project_id}] ready'", enter=True)
-
-        startup_command = str(project.get("startup_command") or "").strip()
-        if startup_command and not no_startup:
-            pane_send(pane.pane_id, startup_command, enter=True)
-
-        agent_cmd = None
-        if agent_by_project and project_id in agent_by_project:
-            agent_cmd = agent_by_project[project_id]
-        elif agent_default and agent_default.strip():
-            agent_cmd = agent_default.strip()
-
-        if agent_cmd:
-            pane_send(pane.pane_id, agent_cmd, enter=True)
-
-    return resolved_layout, list_panes(session)
-
-
-def ghostty_import_plan(
-    *,
-    proj_map: dict[str, dict[str, Any]],
-    max_panes: int,
-    include_idle: bool,
-    preserve_duplicates: bool,
-) -> tuple[list[str], dict[str, str], dict[str, dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    snapshot, _ = terminal_sentinel.classify_sessions(source_filter="ghostty", include_idle=include_idle)
-    sessions = list(snapshot.get("sessions", []))
-    sessions.sort(
-        key=lambda item: (
-            {"active": 0, "waiting": 1, "background": 2, "idle": 3}.get(str(item.get("status")), 9),
-            -(float(item.get("waiting_minutes") or 0.0)),
-        )
-    )
-
-    project_ids: list[str] = []
-    agent_by_project: dict[str, str] = {}
-    project_overrides: dict[str, dict[str, Any]] = {}
-    duplicate_counts: dict[str, int] = {}
-    mapped: list[dict[str, Any]] = []
-    unmatched: list[dict[str, Any]] = []
-
-    for session in sessions:
-        # Skip background sessions — only import active/waiting terminals
-        if str(session.get("status")) == "background":
-            continue
-
-        project_id, cwd = infer_project_id_from_session(session, proj_map)
-
-        # Agent-wrangler is the cowboy, not a horse — never add self to grid
-        if cwd and Path(cwd).resolve() == Path(SELF_PATH).resolve():
-            continue
-        if not project_id:
-            unmatched.append(
-                {
-                    "tty": session.get("tty"),
-                    "pid": session.get("pid"),
-                    "status": session.get("status"),
-                    "agent": session.get("agent"),
-                    "command": session.get("command"),
-                    "cwd": cwd,
-                }
-            )
-            continue
-
-        # Auto-discovered terminal (not in projects.json) — register with cwd
-        if project_id not in proj_map and cwd:
-            project_overrides[project_id] = {"path": cwd, "name": project_id}
-
-        mapped_project_id = project_id
-        if preserve_duplicates:
-            if len(project_ids) >= max(1, max_panes):
-                continue
-            seen = duplicate_counts.get(project_id, 0) + 1
-            duplicate_counts[project_id] = seen
-            if seen > 1:
-                mapped_project_id = f"{project_id}__dup{seen}"
-                base = proj_map.get(project_id, project_overrides.get(project_id, {}))
-                project_overrides[mapped_project_id] = dict(base)
-            project_ids.append(mapped_project_id)
-        else:
-            if project_id not in project_ids:
-                if len(project_ids) >= max(1, max_panes):
-                    continue
-                project_ids.append(project_id)
-
-        agent = str(session.get("agent") or "").strip().lower()
-        if agent in {"claude", "codex", "gemini"} and mapped_project_id not in agent_by_project:
-            agent_by_project[mapped_project_id] = agent
-
-        mapped.append(
-            {
-                "project_id": project_id,
-                "mapped_project_id": mapped_project_id,
-                "tty": session.get("tty"),
-                "pid": session.get("pid"),
-                "status": session.get("status"),
-                "agent": session.get("agent"),
-                "cwd": cwd,
-                "command": session.get("command"),
-            }
-        )
-
-    return project_ids, agent_by_project, project_overrides, mapped, unmatched
-
-
-def _auto_register_projects(
-    project_ids: list[str],
-    project_overrides: dict[str, dict[str, Any]],
-    proj_map: dict[str, dict[str, Any]],
-) -> None:
-    """Auto-add discovered terminals to projects.json so they're remembered."""
-    new_projects: list[dict[str, Any]] = []
-    for pid in project_ids:
-        # Skip duplicates and already-known projects
-        base_id = pid.split("__dup")[0]
-        if base_id in proj_map:
-            continue
-        override = project_overrides.get(pid, {})
-        path = str(override.get("path") or "")
-        if not path:
-            continue
-        # Agent-wrangler is the cowboy, not a horse
-        if Path(path).resolve() == Path(SELF_PATH).resolve():
-            continue
-        new_projects.append({
-            "id": base_id,
-            "name": base_id,
-            "path": path,
-            "group": "personal",
-            "default_branch": "main",
-            "startup_command": "",
-        })
-
-    if not new_projects:
-        return
-
-    # Deduplicate by id
-    seen_ids: set[str] = set()
-    unique: list[dict[str, Any]] = []
-    for p in new_projects:
-        if p["id"] not in seen_ids:
-            seen_ids.add(p["id"])
-            unique.append(p)
-
-    try:
-        config: dict[str, Any] = {}
-        if PROJECTS_CONFIG.exists():
-            config = json.loads(PROJECTS_CONFIG.read_text(encoding="utf-8"))
-        existing_ids = {p["id"] for p in config.get("projects", [])}
-        added = [p for p in unique if p["id"] not in existing_ids]
-        if added:
-            config.setdefault("projects", []).extend(added)
-            PROJECTS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-            PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-            names = ", ".join(p["id"] for p in added)
-            print(f"Auto-registered: {names}")
-    except Exception:
-        pass  # Non-critical — don't fail the import
-
-
-def run_bootstrap(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    layout = args.layout or store.get("default_layout") or DEFAULT_LAYOUT
-
-    project_ids = choose_projects(args.projects, limit=args.limit, group=args.group)
-    proj_map = project_map()
-
-    resolved_layout, _ = create_grid_session(
-        session=session,
-        layout=layout,
-        project_ids=project_ids,
-        proj_map=proj_map,
-        project_overrides=None,
-        no_startup=args.no_startup,
-        agent_default=args.agent,
-        agent_by_project=None,
-        force=args.force,
-    )
-
-    store["default_session"] = session
-    store["default_layout"] = resolved_layout
-    store["default_projects"] = project_ids
-    save_store(store)
-
-    print(f"Created tmux team grid '{session}' with {len(project_ids)} panes")
-    print("Projects: " + ", ".join(project_ids))
-    print(f"Layout: {resolved_layout}")
-    print(f"Attach: tmux attach -t {session}")
-
-    if args.attach:
-        return attach_session(session)
-    return 0
-
-
-def run_import(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    proj_map = project_map()
-
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    layout = args.layout or store.get("default_layout") or DEFAULT_LAYOUT
-    run_startup = bool(args.startup) and (not bool(args.no_startup))
-    run_agents = bool(args.agent) and (not bool(args.no_agent))
-
-    project_ids, agent_by_project, project_overrides, mapped, unmatched = ghostty_import_plan(
-        proj_map=proj_map,
-        max_panes=args.max_panes,
-        include_idle=args.include_idle,
-        preserve_duplicates=args.preserve_duplicates,
-    )
-    if not project_ids:
-        project_ids = choose_projects(None, limit=args.max_panes, group=None)
-        agent_by_project = {}
-        project_overrides = {}
-        mapped = []
-        unmatched = []
-        print("No Ghostty terminals detected — starting from projects.json.")
-
-    # Auto-register discovered terminals into projects.json
-    _auto_register_projects(project_ids, project_overrides, proj_map)
-
-    resolved_layout = choose_layout(layout, pane_count=len(project_ids))
-    if args.dry_run:
-        print("Ghostty import plan (dry-run)")
-        print(f"Session: {session}")
-        print(f"Panes: {len(project_ids)}  Layout: {resolved_layout}")
-        print("Projects: " + ", ".join(project_ids))
-        print(f"Preserve duplicates: {'yes' if args.preserve_duplicates else 'no'}")
-        print(f"Will run startup commands: {'yes' if run_startup else 'no'}")
-        print(f"Will launch detected agents: {'yes' if run_agents else 'no'}")
-        if run_agents and agent_by_project:
-            pairs = [f"{pid}:{agent_by_project[pid]}" for pid in project_ids if pid in agent_by_project]
-            if pairs:
-                print("Agent hints: " + ", ".join(pairs))
-        if unmatched:
-            print(f"Unmatched sessions: {len(unmatched)}")
-        return 0
-
-    resolved_layout, _ = create_grid_session(
-        session=session,
-        layout=layout,
-        project_ids=project_ids,
-        proj_map=proj_map,
-        project_overrides=project_overrides,
-        no_startup=(not run_startup),
-        agent_default=None,
-        agent_by_project=(agent_by_project if run_agents else None),
-        force=args.force,
-    )
-
-    store["default_session"] = session
-    store["default_layout"] = resolved_layout
-    store["default_projects"] = project_ids
-    save_store(store)
-
-    print(f"Imported Ghostty sessions into tmux grid '{session}'")
-    print(f"Panes: {len(project_ids)}  Layout: {resolved_layout}")
-    print("Projects: " + ", ".join(project_ids))
-    print(f"Preserve duplicates: {'enabled' if args.preserve_duplicates else 'disabled'}")
-    print(f"Startup commands: {'enabled' if run_startup else 'disabled'}")
-    print(f"Detected agents: {'enabled' if run_agents else 'disabled'}")
-    if run_agents and agent_by_project:
-        pairs = [f"{pid}:{agent_by_project[pid]}" for pid in project_ids if pid in agent_by_project]
-        if pairs:
-            print("Agent hints: " + ", ".join(pairs))
-
-    print("")
-    print("Mapped sessions:")
-    for item in mapped[: max(1, args.max_panes)]:
-        mapped_project_id = item.get("mapped_project_id") or item.get("project_id") or "-"
-        mapped_text = (
-            f"{item.get('project_id', '-')}" if mapped_project_id == item.get("project_id") else
-            f"{item.get('project_id', '-')} -> {mapped_project_id}"
-        )
-        print(
-            "- tty={tty} status={status} project={project} agent={agent} cwd={cwd}".format(
-                tty=item.get("tty", "-"),
-                status=item.get("status", "-"),
-                project=mapped_text,
-                agent=item.get("agent", "-"),
-                cwd=item.get("cwd") or "-",
-            )
-        )
-
-    if unmatched:
-        print("")
-        print(f"Unmatched sessions: {len(unmatched)} (left out)")
-
-    print("")
-    print(f"Attach: tmux attach -t {session}")
-    print("You do not need to reset Ghostty first. Keep both until this grid feels stable, then close old tabs.")
-
-    if args.attach:
-        return attach_session(session)
-    return 0
-
-
-def run_up(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    proj_map = project_map()
-
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    layout = args.layout or store.get("default_layout") or DEFAULT_LAYOUT
-    run_startup = bool(args.startup) and (not bool(args.no_startup))
-    run_agents = bool(args.agent) and (not bool(args.no_agent))
-
-    exists = session_exists(session)
-    if exists and not args.rebuild:
-        print(f"Using existing session '{session}'")
-    else:
-        if args.mode == "bootstrap":
-            project_ids = choose_projects(args.projects, limit=args.max_panes, group=args.group)
-            agent_by_project = None
-            project_overrides = None
-        else:
-            project_ids, detected_agents, project_overrides, mapped, unmatched = ghostty_import_plan(
-                proj_map=proj_map,
-                max_panes=args.max_panes,
-                include_idle=args.include_idle,
-                preserve_duplicates=args.preserve_duplicates,
-            )
-            agent_by_project = detected_agents if run_agents else None
-
-            if not project_ids:
-                project_ids = choose_projects(args.projects, limit=args.max_panes, group=args.group)
-                agent_by_project = None
-                project_overrides = None
-                if args.projects or args.group:
-                    print("No Ghostty matches found; using configured project selection fallback.")
-                else:
-                    print("No Ghostty terminals detected — starting from projects.json.")
-            else:
-                _auto_register_projects(project_ids, project_overrides, proj_map)
-                print(f"Ghostty mapping: matched={len(mapped)} unmatched={len(unmatched)}")
-
-        resolved_layout, _ = create_grid_session(
-            session=session,
-            layout=layout,
-            project_ids=project_ids,
-            proj_map=proj_map,
-            project_overrides=project_overrides,
-            no_startup=(not run_startup),
-            agent_default=None,
-            agent_by_project=agent_by_project,
-            force=exists,
-        )
-
-        store["default_session"] = session
-        store["default_layout"] = resolved_layout
-        store["default_projects"] = project_ids
-        save_store(store)
-
-        # --- Roundup animation: show each project being wrangled ---
-        skip_anim = os.environ.get("AW_SKIP_ANIM", "").strip() in ("1", "true", "yes")
-        RUST = "\033[38;5;130m"
-        GREEN = "\033[32m"
-        DIM = "\033[2m"
-        RST = "\033[0m"
-
-        print(f"\n  {RUST}Rounding up the herd...{RST}\n")
-
-        for pid in project_ids:
-            if skip_anim:
-                print(f"  {DIM}◦ ─ ─{RST} {GREEN}●{RST} {RUST}{pid:<24}{RST} {GREEN}wrangled ✓{RST}")
-            else:
-                # Lasso animation: rope extends, catches the project
-                sys.stdout.write(f"  {DIM}◦{RST}")
-                sys.stdout.flush()
-                time.sleep(0.08)
-                sys.stdout.write(f" {DIM}─{RST}")
-                sys.stdout.flush()
-                time.sleep(0.06)
-                sys.stdout.write(f" {DIM}─{RST}")
-                sys.stdout.flush()
-                time.sleep(0.06)
-                sys.stdout.write(f" {GREEN}●{RST} {RUST}{pid:<24}{RST}")
-                sys.stdout.flush()
-                time.sleep(0.08)
-                sys.stdout.write(f" {GREEN}wrangled ✓{RST}\n")
-                sys.stdout.flush()
-
-        n = len(project_ids)
-        print(f"\n  {GREEN}✓{RST} All {n} head accounted for. Let's ride.\n")
-        play_sound("Bottle", 0.35)
-
-        print(f"Session ready: {session}")
-        print(f"Panes: {n}  Layout: {resolved_layout}")
-
-    if args.nav:
-        run_nav(argparse.Namespace(remove=False))
-
-    if args.manager:
-        run_manager(
-            argparse.Namespace(
-                session=session,
-                window=args.manager_window,
-                interval=args.manager_interval,
-                replace=args.manager_replace,
-                focus=True,
-                attach=False,
-            )
-        )
-
-    # Apply pane orchestrator format, status bar, and pane dimming
-    set_window_orchestrator_format(session)
-
-    show_status = bool(getattr(args, "status", True))
-    attach = bool(getattr(args, "attach", True))
-
-    if show_status:
-        status_args = argparse.Namespace(session=session)
-        run_status(status_args)
-
-    if attach:
-        return attach_session(session)
-    return 0
-
-
-def run_attach(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    if not session_exists(session):
-        raise ValueError(f"Session '{session}' does not exist")
-    return attach_session(session)
-
-
-def run_status(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    if not session_exists(session):
-        raise ValueError(f"Session '{session}' does not exist")
-    proj_map = project_map()
-    panes = backfill_pane_project_ids(session, list_panes(session), proj_map)
-    print_panes(session, panes)
-    return 0
-
+# ── Rail rendering functions ───────────────────────────────────────
 
 def _sparkline(history: list[int]) -> str:
     """Render a colored health sparkline from history values (0=red, 1=yellow, 2=green)."""
@@ -1799,17 +81,16 @@ def _campfire_header(frame: int, counts: dict[str, int]) -> list[str]:
 
 # --- Barn discovery cache ---
 _barn_cache: list[dict[str, str]] = []
-_barn_cache_time: float = 0.0
+_barn_cache_time = [0.0]  # list for cross-module mutability
 _BARN_CACHE_TTL = 60.0  # rescan ~/  every 60 seconds
 
 
 def _discover_barn_repos(active_project_ids: set[str]) -> list[dict[str, str]]:
     """Scan ~/ for git repos not currently active in the grid. Cached."""
-    global _barn_cache, _barn_cache_time
     import time as _t
 
     now = _t.time()
-    if _barn_cache and (now - _barn_cache_time) < _BARN_CACHE_TTL:
+    if _barn_cache and (now - _barn_cache_time[0]) < _BARN_CACHE_TTL:
         # Return cached list filtered against current active set
         return [r for r in _barn_cache if r["id"] not in active_project_ids]
 
@@ -1819,7 +100,7 @@ def _discover_barn_repos(active_project_ids: set[str]) -> list[dict[str, str]]:
         for entry in sorted(home.iterdir()):
             if entry.name.startswith(".") or not entry.is_dir():
                 continue
-            if str(entry) == SELF_PATH:
+            if str(entry) == _core.SELF_PATH:
                 continue  # exclude agent-wrangler itself
             if (entry / ".git").is_dir():
                 repos.append({
@@ -1830,8 +111,9 @@ def _discover_barn_repos(active_project_ids: set[str]) -> list[dict[str, str]]:
     except OSError:
         pass
 
-    _barn_cache = repos
-    _barn_cache_time = now
+    _barn_cache.clear()
+    _barn_cache.extend(repos)
+    _barn_cache_time[0] = now
     return [r for r in repos if r["id"] not in active_project_ids]
 
 
@@ -1862,11 +144,10 @@ def run_rail(args: argparse.Namespace) -> int:
     import time as _time
     import tty
     import termios
-    global _campfire_frame
 
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
     interval = max(1, int(args.interval))
 
     # Set stdin to raw mode for non-blocking keypress detection (barn graze)
@@ -1900,27 +181,25 @@ def run_rail(args: argparse.Namespace) -> int:
 
 def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any) -> int:
     """Inner rail loop (separated so tty restore happens in finally)."""
-    global _campfire_frame
-    global _last_active_time
-    _last_active_time = _load_active_times()
+    _core._last_active_time.update(_core._load_active_times())
 
-    _append_activity([{
+    _core._append_activity([{
         "project": "_system",
         "event": "rail_started",
     }])
 
     while True:
-        if not session_exists(session):
+        if not session_exists(session):  # noqa: F405
             print(f"Session '{session}' not found.")
             _time.sleep(interval)
             continue
 
-        rows = refresh_pane_health(
+        rows = refresh_pane_health(  # noqa: F405
             session=session,
             capture_lines=40,
             wait_attention_min=5,
         )
-        _log_transitions(rows)
+        _core._log_transitions(rows)
 
         lines: list[str] = []
         lines.append("\033[2J\033[H")  # clear screen
@@ -1938,8 +217,8 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
             if str(row.get("status") or "idle") == "waiting":
                 waiting += 1
 
-        _campfire_frame += 1
-        lines.extend(_campfire_header(_campfire_frame, counts))
+        _core._campfire_frame[0] += 1
+        lines.extend(_campfire_header(_core._campfire_frame[0], counts))
         lines.append("\033[2m" + "─" * 34 + "\033[0m")
 
         # --- Ranch Status summary box ---
@@ -1967,29 +246,29 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
 
             # Update health history
             h_val = health_val.get(health, 2)
-            hist = _health_history.setdefault(project, [])
+            hist = _core._health_history.setdefault(project, [])
             hist.append(h_val)
             if len(hist) > 10:
-                _health_history[project] = hist[-10:]
+                _core._health_history[project] = hist[-10:]
 
             # Check for state change sparkle
-            prev = _prev_rail_health.get(project)
+            prev = _core._prev_rail_health.get(project)
             if prev and prev != health:
-                _sparkle_countdown[project] = 2
+                _core._sparkle_countdown[project] = 2
                 # Play sound on health transitions
                 if health == "red":
-                    play_sound("Basso", 0.4, key=f"red-{project}")
+                    play_sound("Basso", 0.4, key=f"red-{project}")  # noqa: F405
                 elif health == "green" and prev == "red":
-                    play_sound("Bottle", 0.3, key=f"green-{project}")
-            _prev_rail_health[project] = health
+                    play_sound("Bottle", 0.3, key=f"green-{project}")  # noqa: F405
+            _core._prev_rail_health[project] = health
 
             sparkle = ""
-            if _sparkle_countdown.get(project, 0) > 0:
+            if _core._sparkle_countdown.get(project, 0) > 0:
                 sparkle = " \033[38;5;220m✦\033[0m"
-                _sparkle_countdown[project] -= 1
+                _core._sparkle_countdown[project] -= 1
 
             dot_color = {"green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m"}.get(health, "\033[0m")
-            spark = _sparkline(_health_history.get(project, []))
+            spark = _sparkline(_core._health_history.get(project, []))
 
             line = f" {dot_color}●\033[0m{sparkle} {project:<16}"
             if agent and agent != "-":
@@ -1997,10 +276,10 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
 
             # Stall detection: track when last green, show idle time if yellow too long
             if health == "green":
-                _last_active_time[project] = time.time()
-            elif health == "yellow" and project in _last_active_time:
-                idle_min = (time.time() - _last_active_time[project]) / 60.0
-                if idle_min >= _STALL_THRESHOLD_MIN:
+                _core._last_active_time[project] = time.time()
+            elif health == "yellow" and project in _core._last_active_time:
+                idle_min = (time.time() - _core._last_active_time[project]) / 60.0
+                if idle_min >= _core._STALL_THRESHOLD_MIN:
                     line += f" \033[31m{int(idle_min)}m idle\033[0m"
                 elif idle_min >= 2:
                     line += f" \033[2m{int(idle_min)}m\033[0m"
@@ -2008,7 +287,7 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
             lines.append(line)
 
             # Sparkline on its own line (compact, below the pane entry)
-            if len(_health_history.get(project, [])) > 1:
+            if len(_core._health_history.get(project, [])) > 1:
                 lines.append(f"   {spark}")
 
             # Claude Code stats with context bar
@@ -2024,9 +303,9 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
 
                 if cost is not None:
                     # Flash gold when cost increases
-                    prev_cost = _prev_rail_costs.get(project, 0.0)
+                    prev_cost = _core._prev_rail_costs.get(project, 0.0)
                     cost_color = "\033[38;5;214m" if cost > prev_cost else "\033[2m"
-                    _prev_rail_costs[project] = cost
+                    _core._prev_rail_costs[project] = cost
                     lines.append(f"   {cost_color}${cost:.2f}\033[0m")
                     total_cost += cost
                 total_tokens_k += cc.get("tokens_k", 0)
@@ -2039,10 +318,10 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
                 f"\033[2m{total_tokens_k}k tok  ${total_cost:.2f}\033[0m"
             )
 
-        _save_active_times(_last_active_time)
+        _core._save_active_times(_core._last_active_time)
 
         # --- Hidden panes ---
-        hidden = list_hidden_panes(session)
+        hidden = list_hidden_panes(session)  # noqa: F405
         if hidden:
             lines.append(f" \033[2m{len(hidden)} hidden\033[0m")
             for h in hidden:
@@ -2117,33 +396,317 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
                                     if btn == 0 and my in barn_item_y:
                                         chosen = barn_repos[barn_item_y[my]]
                                         _graze_project(chosen["path"])
-                                        global _barn_cache_time
-                                        _barn_cache_time = 0.0
+                                        _barn_cache_time[0] = 0.0
                                         break
                                 except (ValueError, IndexError):
                                     pass
                     elif key.isdigit() and 1 <= int(key) <= min(len(barn_repos) if barn_repos else 0, 9):
                         chosen = barn_repos[int(key) - 1]
                         _graze_project(chosen["path"])
-                        _barn_cache_time = 0.0
+                        _barn_cache_time[0] = 0.0
                         break
         except KeyboardInterrupt:
             break
-    _append_activity([{
+    _core._append_activity([{
         "project": "_system",
         "event": "rail_stopped",
     }])
     return 0
 
 
+# ── Command handlers (run_*) ──────────────────────────────────────
+
+def run_bootstrap(args: argparse.Namespace) -> int:
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    layout = args.layout or store.get("default_layout") or _core.DEFAULT_LAYOUT
+
+    project_ids = choose_projects(args.projects, limit=args.limit, group=args.group)  # noqa: F405
+    proj_map_data = project_map()  # noqa: F405
+
+    resolved_layout, _ = create_grid_session(  # noqa: F405
+        session=session,
+        layout=layout,
+        project_ids=project_ids,
+        proj_map=proj_map_data,
+        project_overrides=None,
+        no_startup=args.no_startup,
+        agent_default=args.agent,
+        agent_by_project=None,
+        force=args.force,
+    )
+
+    store["default_session"] = session
+    store["default_layout"] = resolved_layout
+    store["default_projects"] = project_ids
+    save_store(store)  # noqa: F405
+
+    print(f"Created tmux team grid '{session}' with {len(project_ids)} panes")
+    print("Projects: " + ", ".join(project_ids))
+    print(f"Layout: {resolved_layout}")
+    print(f"Attach: tmux attach -t {session}")
+
+    if args.attach:
+        return attach_session(session)  # noqa: F405
+    return 0
+
+
+def run_import(args: argparse.Namespace) -> int:
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    proj_map_data = project_map()  # noqa: F405
+
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    layout = args.layout or store.get("default_layout") or _core.DEFAULT_LAYOUT
+    run_startup = bool(args.startup) and (not bool(args.no_startup))
+    run_agents = bool(args.agent) and (not bool(args.no_agent))
+
+    project_ids, agent_by_project, project_overrides, mapped, unmatched = ghostty_import_plan(  # noqa: F405
+        proj_map=proj_map_data,
+        max_panes=args.max_panes,
+        include_idle=args.include_idle,
+        preserve_duplicates=args.preserve_duplicates,
+    )
+    if not project_ids:
+        project_ids = choose_projects(None, limit=args.max_panes, group=None)  # noqa: F405
+        agent_by_project = {}
+        project_overrides = {}
+        mapped = []
+        unmatched = []
+        print("No Ghostty terminals detected — starting from projects.json.")
+
+    # Auto-register discovered terminals into projects.json
+    _auto_register_projects(project_ids, project_overrides, proj_map_data)  # noqa: F405
+
+    resolved_layout = choose_layout(layout, pane_count=len(project_ids))  # noqa: F405
+    if args.dry_run:
+        print("Ghostty import plan (dry-run)")
+        print(f"Session: {session}")
+        print(f"Panes: {len(project_ids)}  Layout: {resolved_layout}")
+        print("Projects: " + ", ".join(project_ids))
+        print(f"Preserve duplicates: {'yes' if args.preserve_duplicates else 'no'}")
+        print(f"Will run startup commands: {'yes' if run_startup else 'no'}")
+        print(f"Will launch detected agents: {'yes' if run_agents else 'no'}")
+        if run_agents and agent_by_project:
+            pairs = [f"{pid}:{agent_by_project[pid]}" for pid in project_ids if pid in agent_by_project]
+            if pairs:
+                print("Agent hints: " + ", ".join(pairs))
+        if unmatched:
+            print(f"Unmatched sessions: {len(unmatched)}")
+        return 0
+
+    resolved_layout, _ = create_grid_session(  # noqa: F405
+        session=session,
+        layout=layout,
+        project_ids=project_ids,
+        proj_map=proj_map_data,
+        project_overrides=project_overrides,
+        no_startup=(not run_startup),
+        agent_default=None,
+        agent_by_project=(agent_by_project if run_agents else None),
+        force=args.force,
+    )
+
+    store["default_session"] = session
+    store["default_layout"] = resolved_layout
+    store["default_projects"] = project_ids
+    save_store(store)  # noqa: F405
+
+    print(f"Imported Ghostty sessions into tmux grid '{session}'")
+    print(f"Panes: {len(project_ids)}  Layout: {resolved_layout}")
+    print("Projects: " + ", ".join(project_ids))
+    print(f"Preserve duplicates: {'enabled' if args.preserve_duplicates else 'disabled'}")
+    print(f"Startup commands: {'enabled' if run_startup else 'disabled'}")
+    print(f"Detected agents: {'enabled' if run_agents else 'disabled'}")
+    if run_agents and agent_by_project:
+        pairs = [f"{pid}:{agent_by_project[pid]}" for pid in project_ids if pid in agent_by_project]
+        if pairs:
+            print("Agent hints: " + ", ".join(pairs))
+
+    print("")
+    print("Mapped sessions:")
+    for item in mapped[: max(1, args.max_panes)]:
+        mapped_project_id = item.get("mapped_project_id") or item.get("project_id") or "-"
+        mapped_text = (
+            f"{item.get('project_id', '-')}" if mapped_project_id == item.get("project_id") else
+            f"{item.get('project_id', '-')} -> {mapped_project_id}"
+        )
+        print(
+            "- tty={tty} status={status} project={project} agent={agent} cwd={cwd}".format(
+                tty=item.get("tty", "-"),
+                status=item.get("status", "-"),
+                project=mapped_text,
+                agent=item.get("agent", "-"),
+                cwd=item.get("cwd") or "-",
+            )
+        )
+
+    if unmatched:
+        print("")
+        print(f"Unmatched sessions: {len(unmatched)} (left out)")
+
+    print("")
+    print(f"Attach: tmux attach -t {session}")
+    print("You do not need to reset Ghostty first. Keep both until this grid feels stable, then close old tabs.")
+
+    if args.attach:
+        return attach_session(session)  # noqa: F405
+    return 0
+
+
+def run_up(args: argparse.Namespace) -> int:
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    proj_map_data = project_map()  # noqa: F405
+
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    layout = args.layout or store.get("default_layout") or _core.DEFAULT_LAYOUT
+    run_startup = bool(args.startup) and (not bool(args.no_startup))
+    run_agents = bool(args.agent) and (not bool(args.no_agent))
+
+    exists = session_exists(session)  # noqa: F405
+    if exists and not args.rebuild:
+        print(f"Using existing session '{session}'")
+    else:
+        if args.mode == "bootstrap":
+            project_ids = choose_projects(args.projects, limit=args.max_panes, group=args.group)  # noqa: F405
+            agent_by_project = None
+            project_overrides = None
+        else:
+            project_ids, detected_agents, project_overrides, mapped, unmatched = ghostty_import_plan(  # noqa: F405
+                proj_map=proj_map_data,
+                max_panes=args.max_panes,
+                include_idle=args.include_idle,
+                preserve_duplicates=args.preserve_duplicates,
+            )
+            agent_by_project = detected_agents if run_agents else None
+
+            if not project_ids:
+                project_ids = choose_projects(args.projects, limit=args.max_panes, group=args.group)  # noqa: F405
+                agent_by_project = None
+                project_overrides = None
+                if args.projects or args.group:
+                    print("No Ghostty matches found; using configured project selection fallback.")
+                else:
+                    print("No Ghostty terminals detected — starting from projects.json.")
+            else:
+                _auto_register_projects(project_ids, project_overrides, proj_map_data)  # noqa: F405
+                print(f"Ghostty mapping: matched={len(mapped)} unmatched={len(unmatched)}")
+
+        resolved_layout, _ = create_grid_session(  # noqa: F405
+            session=session,
+            layout=layout,
+            project_ids=project_ids,
+            proj_map=proj_map_data,
+            project_overrides=project_overrides,
+            no_startup=(not run_startup),
+            agent_default=None,
+            agent_by_project=agent_by_project,
+            force=exists,
+        )
+
+        store["default_session"] = session
+        store["default_layout"] = resolved_layout
+        store["default_projects"] = project_ids
+        save_store(store)  # noqa: F405
+
+        # --- Roundup animation: show each project being wrangled ---
+        skip_anim = os.environ.get("AW_SKIP_ANIM", "").strip() in ("1", "true", "yes")
+        RUST = "\033[38;5;130m"
+        GREEN = "\033[32m"
+        DIM = "\033[2m"
+        RST = "\033[0m"
+
+        print(f"\n  {RUST}Rounding up the herd...{RST}\n")
+
+        for pid in project_ids:
+            if skip_anim:
+                print(f"  {DIM}◦ ─ ─{RST} {GREEN}●{RST} {RUST}{pid:<24}{RST} {GREEN}wrangled ✓{RST}")
+            else:
+                # Lasso animation: rope extends, catches the project
+                sys.stdout.write(f"  {DIM}◦{RST}")
+                sys.stdout.flush()
+                time.sleep(0.08)
+                sys.stdout.write(f" {DIM}─{RST}")
+                sys.stdout.flush()
+                time.sleep(0.06)
+                sys.stdout.write(f" {DIM}─{RST}")
+                sys.stdout.flush()
+                time.sleep(0.06)
+                sys.stdout.write(f" {GREEN}●{RST} {RUST}{pid:<24}{RST}")
+                sys.stdout.flush()
+                time.sleep(0.08)
+                sys.stdout.write(f" {GREEN}wrangled ✓{RST}\n")
+                sys.stdout.flush()
+
+        n = len(project_ids)
+        print(f"\n  {GREEN}✓{RST} All {n} head accounted for. Let's ride.\n")
+        play_sound("Bottle", 0.35)  # noqa: F405
+
+        print(f"Session ready: {session}")
+        print(f"Panes: {n}  Layout: {resolved_layout}")
+
+    if args.nav:
+        run_nav(argparse.Namespace(remove=False))
+
+    if args.manager:
+        run_manager(
+            argparse.Namespace(
+                session=session,
+                window=args.manager_window,
+                interval=args.manager_interval,
+                replace=args.manager_replace,
+                focus=True,
+                attach=False,
+            )
+        )
+
+    # Apply pane orchestrator format, status bar, and pane dimming
+    set_window_orchestrator_format(session)  # noqa: F405
+
+    show_status = bool(getattr(args, "status", True))
+    attach = bool(getattr(args, "attach", True))
+
+    if show_status:
+        status_args = argparse.Namespace(session=session)
+        run_status(status_args)
+
+    if attach:
+        return attach_session(session)  # noqa: F405
+    return 0
+
+
+def run_attach(args: argparse.Namespace) -> int:
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if not session_exists(session):  # noqa: F405
+        raise ValueError(f"Session '{session}' does not exist")
+    return attach_session(session)  # noqa: F405
+
+
+def run_status(args: argparse.Namespace) -> int:
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if not session_exists(session):  # noqa: F405
+        raise ValueError(f"Session '{session}' does not exist")
+    proj_map_data = project_map()  # noqa: F405
+    panes = backfill_pane_project_ids(session, list_panes(session), proj_map_data)  # noqa: F405
+    print_panes(session, panes)  # noqa: F405
+    return 0
+
+
 def run_paint(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    if not session_exists(session):
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if not session_exists(session):  # noqa: F405
         raise ValueError(f"Session '{session}' does not exist")
 
-    rows = refresh_pane_health(
+    rows = refresh_pane_health(  # noqa: F405
         session=session,
         capture_lines=args.capture_lines,
         wait_attention_min=args.wait_attention_min,
@@ -2166,27 +729,27 @@ def run_paint(args: argparse.Namespace) -> int:
 
 
 def run_watch(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    if not session_exists(session):
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if not session_exists(session):  # noqa: F405
         raise ValueError(f"Session '{session}' does not exist")
 
     loops = 0
     interval = max(1, int(args.interval))
     try:
         while True:
-            rows = refresh_pane_health(
+            rows = refresh_pane_health(  # noqa: F405
                 session=session,
                 capture_lines=args.capture_lines,
                 wait_attention_min=args.wait_attention_min,
 
             )
-            _log_transitions(rows)
+            _core._log_transitions(rows)
             if not args.no_clear:
                 print("\033[2J\033[H", end="")
             attention = len([row for row in rows if row.get("needs_attention")])
-            print(f"[{now_iso()}] Agent Wrangler Manager  session={session} panes={len(rows)} attention={attention}")
+            print(f"[{now_iso()}] Agent Wrangler Manager  session={session} panes={len(rows)} attention={attention}")  # noqa: F405
             print(f"{'IDX':<4} {'PROJECT':<22} {'HLTH':<6} {'STATUS':<10} {'WAIT':<6} {'AGENT':<8} {'CTX':<6} {'COST':<8} REASON")
             for row in rows:
                 wait = f"{row['wait']}m" if row.get("wait") is not None else "-"
@@ -2249,7 +812,7 @@ def run_watch(args: argparse.Namespace) -> int:
 
 
 def manager_window_exists(session: str, window_name: str) -> bool:
-    code, out, _ = tmux(["list-windows", "-t", session, "-F", "#{window_name}"], timeout=5)
+    code, out, _ = tmux(["list-windows", "-t", session, "-F", "#{window_name}"], timeout=5)  # noqa: F405
     if code != 0:
         return False
     names = {line.strip() for line in out.splitlines() if line.strip()}
@@ -2257,33 +820,33 @@ def manager_window_exists(session: str, window_name: str) -> bool:
 
 
 def run_manager(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    if not session_exists(session):
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if not session_exists(session):  # noqa: F405
         raise ValueError(f"Session '{session}' does not exist")
 
     window = args.window
     if manager_window_exists(session, window):
         if args.replace:
-            code, _, err = tmux(["kill-window", "-t", f"{session}:{window}"], timeout=5)
+            code, _, err = tmux(["kill-window", "-t", f"{session}:{window}"], timeout=5)  # noqa: F405
             if code != 0:
                 raise ValueError(err.strip() or f"failed to replace manager window '{window}'")
         else:
             print(f"Manager window '{window}' already exists.")
             if args.focus:
-                tmux(["select-window", "-t", f"{session}:{window}"], timeout=5)
+                tmux(["select-window", "-t", f"{session}:{window}"], timeout=5)  # noqa: F405
             if getattr(args, "attach", False):
-                return attach_session(session)
+                return attach_session(session)  # noqa: F405
             return 0
 
     if not manager_window_exists(session, window):
         # Create manager window with Claude Code
-        wrangler_root = str(ROOT)
+        wrangler_root = str(_core.ROOT)
         claude_cmd = "claude --dangerously-skip-permissions"
         shell_tail = "; exec zsh"
         shell_command = "zsh -lc " + shlex.quote(claude_cmd + shell_tail)
-        code, _, err = tmux(
+        code, _, err = tmux(  # noqa: F405
             ["new-window", "-d", "-t", session, "-n", window, "-c", wrangler_root, shell_command],
             timeout=8,
         )
@@ -2292,13 +855,13 @@ def run_manager(args: argparse.Namespace) -> int:
             return 1
 
         # Split right pane for status rail (~25% width)
-        rail_script = ROOT / "scripts" / "agent_wrangler.py"
+        rail_script = _core.ROOT / "scripts" / "agent_wrangler.py"
         rail_cmd = (
             f"python3 {shlex.quote(str(rail_script))} teams rail "
             f"--session {shlex.quote(session)} --interval {max(1, int(args.interval))}"
         )
         rail_shell = "zsh -lc " + shlex.quote(rail_cmd + shell_tail)
-        code, _, err = tmux(
+        code, _, err = tmux(  # noqa: F405
             ["split-window", "-h", "-t", f"{session}:{window}", "-l", "25%",
              "-c", wrangler_root, rail_shell],
             timeout=8,
@@ -2307,22 +870,22 @@ def run_manager(args: argparse.Namespace) -> int:
             print(f"Warning: failed to create status rail split: {err.strip()}")
 
         # Focus the left pane (Claude Code) within the manager window
-        tmux(["select-pane", "-t", f"{session}:{window}.0"], timeout=5)
+        tmux(["select-pane", "-t", f"{session}:{window}.0"], timeout=5)  # noqa: F405
 
         if not manager_window_exists(session, window):
             raise ValueError(f"manager window '{window}' did not persist")
         print(f"Manager window started: {session}:{window} (claude + rail)")
 
     if args.focus:
-        tmux(["select-window", "-t", f"{session}:{window}"], timeout=5)
+        tmux(["select-window", "-t", f"{session}:{window}"], timeout=5)  # noqa: F405
     if getattr(args, "attach", False):
-        return attach_session(session)
+        return attach_session(session)  # noqa: F405
     return 0
 
 
 
 def run_profile_list(_: argparse.Namespace) -> int:
-    store = load_store()
+    store = load_store()  # noqa: F405
     profiles = store.get("profiles", {})
     current = str(profiles.get("current") or "default")
     items = profiles.get("items", {}) if isinstance(profiles.get("items"), dict) else {}
@@ -2343,7 +906,7 @@ def run_profile_list(_: argparse.Namespace) -> int:
 
 
 def run_profile_status(_: argparse.Namespace) -> int:
-    store = load_store()
+    store = load_store()  # noqa: F405
     profiles = store.get("profiles", {})
     current = str(profiles.get("current") or "default")
     items = profiles.get("items", {}) if isinstance(profiles.get("items"), dict) else {}
@@ -2359,8 +922,8 @@ def run_profile_status(_: argparse.Namespace) -> int:
 
 
 def run_profile_save(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
     profiles = store.setdefault("profiles", {})
     items = profiles.setdefault("items", {})
     if not isinstance(items, dict):
@@ -2371,14 +934,14 @@ def run_profile_save(args: argparse.Namespace) -> int:
     if not name:
         raise ValueError("Profile name is required")
 
-    sessions = split_csv(args.sessions)
+    sessions = split_csv(args.sessions)  # noqa: F405
     if not sessions and args.auto_running:
-        sessions = [s for s in list_tmux_sessions() if s]
+        sessions = [s for s in list_tmux_sessions() if s]  # noqa: F405
 
     item = items.setdefault(name, {})
     item["managed_sessions"] = sorted(set(sessions))
     item["max_panes"] = max(1, int(args.max_panes))
-    save_store(store)
+    save_store(store)  # noqa: F405
 
     print(f"Saved profile '{name}'")
     print(f"- max_panes: {item['max_panes']}")
@@ -2387,8 +950,8 @@ def run_profile_save(args: argparse.Namespace) -> int:
 
 
 def run_profile_use(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
     profiles = store.setdefault("profiles", {})
     items = profiles.get("items", {}) if isinstance(profiles.get("items"), dict) else {}
 
@@ -2399,7 +962,7 @@ def run_profile_use(args: argparse.Namespace) -> int:
 
     profiles["current"] = name
     item = items.get(name, {})
-    save_store(store)
+    save_store(store)  # noqa: F405
 
     print(f"Active profile: {name}")
     print(f"- max_panes: {int(item.get('max_panes') or 10)}")
@@ -2410,11 +973,11 @@ def run_profile_use(args: argparse.Namespace) -> int:
 
 
 def run_drift(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    proj_map = project_map()
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    proj_map_data = project_map()  # noqa: F405
 
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
     sessions = [session]
 
     total_projects = 0
@@ -2422,11 +985,11 @@ def run_drift(args: argparse.Namespace) -> int:
     high_drift: list[tuple[str, str, int]] = []
 
     for session in sessions:
-        if not session_exists(session):
+        if not session_exists(session):  # noqa: F405
             print(f"\n[{session}] missing")
             continue
         try:
-            projects = project_rows_for_session(session, proj_map)
+            projects = project_rows_for_session(session, proj_map_data)  # noqa: F405
         except ValueError as exc:
             print(f"\n[{session}] error: {exc}")
             continue
@@ -2471,12 +1034,12 @@ def run_drift(args: argparse.Namespace) -> int:
 
 
 def run_persistence_status(_: argparse.Namespace) -> int:
-    store = load_store()
+    store = load_store()  # noqa: F405
     persistence = store.get("persistence", {})
     enabled = bool(persistence.get("enabled"))
     autosave = int(persistence.get("autosave_minutes") or 15)
     last_snapshot = str(persistence.get("last_snapshot") or "")
-    save_script, restore_script = tmux_resurrect_scripts()
+    save_script, restore_script = tmux_resurrect_scripts()  # noqa: F405
 
     print("Persistence status")
     print(f"- enabled: {'yes' if enabled else 'no'}")
@@ -2486,8 +1049,8 @@ def run_persistence_status(_: argparse.Namespace) -> int:
     print(f"- tmux-resurrect restore script: {'yes' if restore_script.exists() else 'no'} ({restore_script})")
 
     snapshots: list[Path] = []
-    if PERSISTENCE_DIR.exists():
-        snapshots = sorted(PERSISTENCE_DIR.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if _core.PERSISTENCE_DIR.exists():
+        snapshots = sorted(_core.PERSISTENCE_DIR.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
     print(f"- local snapshots: {len(snapshots)}")
     for path in snapshots[:10]:
         stamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).replace(microsecond=0).isoformat()
@@ -2496,11 +1059,11 @@ def run_persistence_status(_: argparse.Namespace) -> int:
 
 
 def run_persistence_enable(args: argparse.Namespace) -> int:
-    store = load_store()
+    store = load_store()  # noqa: F405
     persistence = store.setdefault("persistence", {})
     persistence["enabled"] = True
     persistence["autosave_minutes"] = max(1, int(args.autosave_minutes))
-    save_store(store)
+    save_store(store)  # noqa: F405
     print(
         "Persistence enabled (autosave_minutes={mins}).".format(
             mins=int(persistence.get("autosave_minutes") or 15)
@@ -2511,29 +1074,30 @@ def run_persistence_enable(args: argparse.Namespace) -> int:
 
 
 def run_persistence_disable(_: argparse.Namespace) -> int:
-    store = load_store()
+    store = load_store()  # noqa: F405
     persistence = store.setdefault("persistence", {})
     persistence["enabled"] = False
-    save_store(store)
+    save_store(store)  # noqa: F405
     print("Persistence disabled.")
     return 0
 
 
 def run_persistence_save(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    if not session_exists(session):
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if not session_exists(session):  # noqa: F405
         raise ValueError(f"Session '{session}' does not exist")
 
-    proj_map = project_map()
-    panes = backfill_pane_project_ids(session, list_panes(session), proj_map)
-    snapshot, _ = terminal_sentinel.classify_sessions(source_filter="all", include_idle=True)
-    by_tty, by_path = _build_session_indexes(snapshot)
+    proj_map_data = project_map()  # noqa: F405
+    panes = backfill_pane_project_ids(session, list_panes(session), proj_map_data)  # noqa: F405
+    import terminal_sentinel as _ts
+    snapshot, _ = _ts.classify_sessions(source_filter="all", include_idle=True)
+    by_tty, by_path = _core._build_session_indexes(snapshot)
     pane_rows: list[dict[str, Any]] = []
     for pane in panes:
         tty_short = pane.pane_tty.split("/")[-1]
-        monitor = _resolve_monitor(tty_short, pane.pane_path, by_tty, by_path)
+        monitor = _core._resolve_monitor(tty_short, pane.pane_path, by_tty, by_path)
         pane_rows.append(
             {
                 "index": pane.pane_index,
@@ -2546,11 +1110,11 @@ def run_persistence_save(args: argparse.Namespace) -> int:
             }
         )
 
-    layout_hint = str(store.get("default_layout") or DEFAULT_LAYOUT)
+    layout_hint = str(store.get("default_layout") or _core.DEFAULT_LAYOUT)
     data = {
-        "saved_at": now_iso(),
+        "saved_at": now_iso(),  # noqa: F405
         "session": session,
-        "layout": (layout_hint if layout_hint in LAYOUT_CHOICES else DEFAULT_LAYOUT),
+        "layout": (layout_hint if layout_hint in _core.LAYOUT_CHOICES else _core.DEFAULT_LAYOUT),
         "pane_count": len(pane_rows),
         "panes": pane_rows,
     }
@@ -2558,22 +1122,22 @@ def run_persistence_save(args: argparse.Namespace) -> int:
     if args.file:
         snapshot_path = Path(args.file).expanduser()
     else:
-        snapshot_path = persistence_snapshot_path(args.name or session)
+        snapshot_path = persistence_snapshot_path(args.name or session)  # noqa: F405
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     snapshot_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     persistence = store.setdefault("persistence", {})
     persistence["last_snapshot"] = str(snapshot_path)
-    save_store(store)
+    save_store(store)  # noqa: F405
 
     print(f"Saved persistence snapshot: {snapshot_path}")
     print(f"Session: {session}  panes={len(pane_rows)}")
 
     if args.tmux_resurrect:
-        save_script, _ = tmux_resurrect_scripts()
+        save_script, _ = tmux_resurrect_scripts()  # noqa: F405
         if not save_script.exists():
             raise ValueError(f"tmux-resurrect save script not found: {save_script}")
-        code, _, err = run([str(save_script)], timeout=45)
+        code, _, err = run([str(save_script)], timeout=45)  # noqa: F405
         if code != 0:
             detail = (err or "").strip()
             raise ValueError(detail or "tmux-resurrect save failed")
@@ -2582,16 +1146,16 @@ def run_persistence_save(args: argparse.Namespace) -> int:
 
 
 def run_persistence_restore(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
     if args.file:
         snapshot_path = Path(args.file).expanduser()
     elif args.name:
-        snapshot_path = persistence_snapshot_path(args.name)
+        snapshot_path = persistence_snapshot_path(args.name)  # noqa: F405
     else:
         remembered = str(store.get("persistence", {}).get("last_snapshot") or "")
-        snapshot_path = Path(remembered).expanduser() if remembered else persistence_snapshot_path(
-            store.get("default_session") or DEFAULT_SESSION
+        snapshot_path = Path(remembered).expanduser() if remembered else persistence_snapshot_path(  # noqa: F405
+            store.get("default_session") or _core.DEFAULT_SESSION
         )
     if not snapshot_path.exists():
         raise ValueError(f"snapshot file not found: {snapshot_path}")
@@ -2605,8 +1169,8 @@ def run_persistence_restore(args: argparse.Namespace) -> int:
     if not isinstance(pane_items, list) or not pane_items:
         raise ValueError("snapshot has no panes")
 
-    session = args.session or str(payload.get("session") or store.get("default_session") or DEFAULT_SESSION)
-    proj_map = project_map()
+    session = args.session or str(payload.get("session") or store.get("default_session") or _core.DEFAULT_SESSION)
+    proj_map_data = project_map()  # noqa: F405
     project_ids: list[str] = []
     project_overrides: dict[str, dict[str, Any]] = {}
     agent_by_project: dict[str, str] = {}
@@ -2624,11 +1188,11 @@ def run_persistence_restore(args: argparse.Namespace) -> int:
 
         path = str(pane.get("path") or "").strip()
         if not path:
-            path = str(proj_map.get(base_project_id, {}).get("path") or "").strip()
+            path = str(proj_map_data.get(base_project_id, {}).get("path") or "").strip()
         if not path:
             continue
 
-        base_project = dict(proj_map.get(base_project_id, {}))
+        base_project = dict(proj_map_data.get(base_project_id, {}))
         base_project["path"] = path
         base_project.setdefault("startup_command", "")
         project_overrides[project_id] = base_project
@@ -2641,13 +1205,13 @@ def run_persistence_restore(args: argparse.Namespace) -> int:
     if not project_ids:
         raise ValueError("snapshot has no restorable pane paths")
 
-    layout_hint = str(payload.get("layout") or DEFAULT_LAYOUT)
-    layout = args.layout or (layout_hint if layout_hint in LAYOUT_CHOICES else DEFAULT_LAYOUT)
-    resolved_layout, _ = create_grid_session(
+    layout_hint = str(payload.get("layout") or _core.DEFAULT_LAYOUT)
+    layout = args.layout or (layout_hint if layout_hint in _core.LAYOUT_CHOICES else _core.DEFAULT_LAYOUT)
+    resolved_layout, _ = create_grid_session(  # noqa: F405
         session=session,
         layout=layout,
         project_ids=project_ids,
-        proj_map=proj_map,
+        proj_map=proj_map_data,
         project_overrides=project_overrides,
         no_startup=(not args.startup),
         agent_default=None,
@@ -2660,7 +1224,7 @@ def run_persistence_restore(args: argparse.Namespace) -> int:
     store["default_projects"] = project_ids
     persistence = store.setdefault("persistence", {})
     persistence["last_snapshot"] = str(snapshot_path)
-    save_store(store)
+    save_store(store)  # noqa: F405
 
     print(f"Restored snapshot into session '{session}'")
     print(f"Panes: {len(project_ids)}  Layout: {resolved_layout}")
@@ -2669,25 +1233,25 @@ def run_persistence_restore(args: argparse.Namespace) -> int:
     print(f"Agent relaunch: {'enabled' if args.agent else 'disabled'}")
 
     if args.tmux_resurrect:
-        _, restore_script = tmux_resurrect_scripts()
+        _, restore_script = tmux_resurrect_scripts()  # noqa: F405
         if not restore_script.exists():
             raise ValueError(f"tmux-resurrect restore script not found: {restore_script}")
-        code, _, err = run([str(restore_script)], timeout=60)
+        code, _, err = run([str(restore_script)], timeout=60)  # noqa: F405
         if code != 0:
             detail = (err or "").strip()
             raise ValueError(detail or "tmux-resurrect restore failed")
         print("tmux-resurrect restore completed.")
 
     if args.attach:
-        return attach_session(session)
+        return attach_session(session)  # noqa: F405
     return 0
 
 
 def run_hooks_enable(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    if not session_exists(session):
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if not session_exists(session):  # noqa: F405
         raise ValueError(f"Session '{session}' does not exist")
 
     script = Path(__file__).resolve()
@@ -2697,50 +1261,50 @@ def run_hooks_enable(args: argparse.Namespace) -> int:
         "--no-colorize"
     )
     hook_cmd = f"run-shell -b {shlex.quote(paint_cmd + ' >/dev/null 2>&1')}"
-    for name in HOOK_EVENTS:
-        code, _, err = tmux(["set-hook", "-t", session, name, hook_cmd], timeout=5)
+    for name in _core.HOOK_EVENTS:
+        code, _, err = tmux(["set-hook", "-t", session, name, hook_cmd], timeout=5)  # noqa: F405
         if code != 0:
             raise ValueError(err.strip() or f"failed to set hook '{name}'")
     print(f"Enabled hooks for session '{session}'")
-    for name in HOOK_EVENTS:
+    for name in _core.HOOK_EVENTS:
         print(f"- {name}")
     return 0
 
 
 def run_hooks_disable(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    if not session_exists(session):
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if not session_exists(session):  # noqa: F405
         raise ValueError(f"Session '{session}' does not exist")
 
-    for name in HOOK_EVENTS:
-        tmux(["set-hook", "-u", "-t", session, name], timeout=5)
+    for name in _core.HOOK_EVENTS:
+        tmux(["set-hook", "-u", "-t", session, name], timeout=5)  # noqa: F405
     print(f"Disabled hooks for session '{session}'")
     return 0
 
 
 def run_hooks_status(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    if not session_exists(session):
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if not session_exists(session):  # noqa: F405
         raise ValueError(f"Session '{session}' does not exist")
 
-    code, out, err = tmux(["show-hooks", "-t", session], timeout=5)
+    code, out, err = tmux(["show-hooks", "-t", session], timeout=5)  # noqa: F405
     if code != 0:
         raise ValueError(err.strip() or f"failed to read hooks for session '{session}'")
 
     found = 0
     print(f"Hooks status for '{session}'")
-    for name in HOOK_EVENTS:
+    for name in _core.HOOK_EVENTS:
         matched = [line.strip() for line in out.splitlines() if line.strip().startswith(name)]
         if matched:
             found += 1
             print(f"- {name}: enabled")
         else:
             print(f"- {name}: disabled")
-    print(f"Enabled hooks: {found}/{len(HOOK_EVENTS)}")
+    print(f"Enabled hooks: {found}/{len(_core.HOOK_EVENTS)}")
     return 0
 
 
@@ -2768,10 +1332,10 @@ def doctor_fix_for_row(row: dict[str, Any]) -> str:
 
 
 def run_doctor(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
 
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
     sessions = [session]
 
     print("Agent Wrangler Doctor")
@@ -2784,15 +1348,15 @@ def run_doctor(args: argparse.Namespace) -> int:
     for session in sessions:
         print("")
         print(f"[{session}]")
-        if not session_exists(session):
+        if not session_exists(session):  # noqa: F405
             print("- missing session")
             continue
 
-        rows = refresh_pane_health(
+        rows = refresh_pane_health(  # noqa: F405
             session=session,
             capture_lines=max(20, int(args.capture_lines)),
             wait_attention_min=max(0, int(args.wait_attention_min)),
-    
+
         )
         if args.only_attention:
             rows = [row for row in rows if row.get("needs_attention") or str(row.get("health")) == "red"]
@@ -2847,8 +1411,8 @@ def run_doctor(args: argparse.Namespace) -> int:
 
 def _build_context_menu_cmd(session: str) -> list[str]:
     """Build a tmux display-menu command for right-click pane management."""
-    aw = str(ROOT / "scripts" / "agent-wrangler")
-    aw_py = str(ROOT / "scripts" / "agent_wrangler.py")
+    aw = str(_core.ROOT / "scripts" / "agent-wrangler")
+    aw_py = str(_core.ROOT / "scripts" / "agent_wrangler.py")
     # Use pane_id (e.g. %5) — tmux expands #{pane_id} reliably in display-menu
     # pane_target() resolves pane IDs so all commands work with this
     pid = "#{pane_id}"
@@ -2881,7 +1445,7 @@ def _build_context_menu_cmd(session: str) -> list[str]:
 
 
 def run_nav(args: argparse.Namespace) -> int:
-    ensure_tmux()
+    ensure_tmux()  # noqa: F405
     pane_bindings = [
         ("M-Left", ["select-pane", "-L"]),
         ("M-Right", ["select-pane", "-R"]),
@@ -2896,14 +1460,14 @@ def run_nav(args: argparse.Namespace) -> int:
     for idx in range(1, 10):
         index_bindings.append((f"M-{idx}", ["select-window", "-t", f":{idx - 1}"]))
     # Named window shortcuts for manager/grid workflow
-    store = load_store()
-    session = store.get("default_session") or DEFAULT_SESSION
+    store = load_store()  # noqa: F405
+    session = store.get("default_session") or _core.DEFAULT_SESSION
     named_window_bindings = [
         ("M-m", ["select-window", "-t", f"{session}:manager"]),
         ("M-g", ["select-window", "-t", f"{session}:grid"]),
     ]
-    exit_script = str(ROOT / "scripts" / "agent-wrangler")
-    summary_script = str(ROOT / "scripts" / "agent_wrangler.py")
+    exit_script = str(_core.ROOT / "scripts" / "agent-wrangler")
+    summary_script = str(_core.ROOT / "scripts" / "agent_wrangler.py")
     utility_bindings = [
         ("M-z", ["resize-pane", "-Z"]),          # zoom toggle
         ("M-j", ["display-panes", "-d", "2000"]),  # jump by number overlay
@@ -2918,24 +1482,24 @@ def run_nav(args: argparse.Namespace) -> int:
 
     if args.remove:
         for key, _cmd in all_bindings:
-            tmux(["unbind-key", "-n", key], timeout=5)
+            tmux(["unbind-key", "-n", key], timeout=5)  # noqa: F405
         print("Removed no-prefix Alt navigation bindings (pane + window).")
         return 0
 
     for key, cmd in all_bindings:
-        tmux(["bind-key", "-n", key, *cmd], timeout=5)
+        tmux(["bind-key", "-n", key, *cmd], timeout=5)  # noqa: F405
 
     # Double-click to zoom/unzoom a pane
-    tmux(["bind-key", "-n", "DoubleClick1Pane", "resize-pane", "-Z"], timeout=5)
+    tmux(["bind-key", "-n", "DoubleClick1Pane", "resize-pane", "-Z"], timeout=5)  # noqa: F405
 
     # Right-click context menu for pane management
     menu_cmd = _build_context_menu_cmd(session)
-    tmux(["bind-key", "-n", "MouseDown3Pane", *menu_cmd], timeout=5)
+    tmux(["bind-key", "-n", "MouseDown3Pane", *menu_cmd], timeout=5)  # noqa: F405
 
     # Source Ghostty-optimized tmux config if available
-    tmux_conf = ROOT / "config" / "tmux.conf"
+    tmux_conf = _core.ROOT / "config" / "tmux.conf"
     if tmux_conf.exists():
-        tmux(["source-file", str(tmux_conf)], timeout=5)
+        tmux(["source-file", str(tmux_conf)], timeout=5)  # noqa: F405
 
     print("Enabled navigation bindings.")
     print("Mouse: click select | double-click zoom | right-click menu | scroll browse")
@@ -2945,41 +1509,41 @@ def run_nav(args: argparse.Namespace) -> int:
 
 
 def run_send(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    pane = pane_target(session, args.pane)
-    pane_send(pane.pane_id, args.command, enter=(not args.no_enter))
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    pane = pane_target(session, args.pane)  # noqa: F405
+    pane_send(pane.pane_id, args.command, enter=(not args.no_enter))  # noqa: F405
     print(f"sent to {pane.pane_id} ({pane.pane_title}): {args.command}")
     return 0
 
 
 def run_stop(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    pane = pane_target(session, args.pane)
-    pane_ctrl_c(pane.pane_id)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    pane = pane_target(session, args.pane)  # noqa: F405
+    pane_ctrl_c(pane.pane_id)  # noqa: F405
     print(f"sent Ctrl-C to {pane.pane_id} ({pane.pane_title})")
     return 0
 
 
 def run_restart(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    pane = pane_target(session, args.pane)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    pane = pane_target(session, args.pane)  # noqa: F405
 
-    pane_ctrl_c(pane.pane_id)
+    pane_ctrl_c(pane.pane_id)  # noqa: F405
 
-    proj_map = project_map()
+    proj_map_data = project_map()  # noqa: F405
     project_id = pane.project_id or pane.pane_title
-    if project_id not in proj_map:
-        inferred = infer_project_id_from_path(pane.pane_path, proj_map)
+    if project_id not in proj_map_data:
+        inferred = infer_project_id_from_path(pane.pane_path, proj_map_data)  # noqa: F405
         if inferred:
             project_id = inferred
-            pane_set_project_id(pane.pane_id, project_id)
-    project = proj_map.get(project_id)
+            pane_set_project_id(pane.pane_id, project_id)  # noqa: F405
+    project = proj_map_data.get(project_id)
     if not project:
         raise ValueError(
             f"Pane project id '{project_id}' is not a known project id."
@@ -2989,16 +1553,16 @@ def run_restart(args: argparse.Namespace) -> int:
     if not startup_command:
         raise ValueError(f"Project '{project_id}' has no startup_command")
 
-    pane_send(pane.pane_id, startup_command, enter=True)
+    pane_send(pane.pane_id, startup_command, enter=True)  # noqa: F405
     print(f"restarted {pane.pane_id} ({project_id}) with: {startup_command}")
     return 0
 
 
 def run_agent(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    pane = pane_target(session, args.pane)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    pane = pane_target(session, args.pane)  # noqa: F405
 
     tool = args.tool.strip()
     tokens: list[str] = [tool]
@@ -3016,32 +1580,32 @@ def run_agent(args: argparse.Namespace) -> int:
             tokens.insert(1, "--dangerously-skip-permissions")
             command = " ".join(token for token in tokens if token)
 
-    pane_send(pane.pane_id, command, enter=True)
-    play_sound("Morse", 0.3, key=f"agent-{pane.pane_id}")
+    pane_send(pane.pane_id, command, enter=True)  # noqa: F405
+    play_sound("Morse", 0.3, key=f"agent-{pane.pane_id}")  # noqa: F405
     print(f"launched agent in {pane.pane_id} ({pane.pane_title}): {command}")
     return 0
 
 
 def run_focus(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    pane = pane_target(session, args.pane)
-    code, _, err = tmux(["select-pane", "-t", pane.pane_id], timeout=5)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    pane = pane_target(session, args.pane)  # noqa: F405
+    code, _, err = tmux(["select-pane", "-t", pane.pane_id], timeout=5)  # noqa: F405
     if code != 0:
         raise ValueError(err.strip() or f"failed to focus pane {pane.pane_id}")
     print(f"focused {pane.pane_id} ({pane.pane_title})")
     if args.attach:
-        return attach_session(session)
+        return attach_session(session)  # noqa: F405
     return 0
 
 
 def run_kill(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    pane = pane_target(session, args.pane)
-    code, _, err = tmux(["kill-pane", "-t", pane.pane_id], timeout=5)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    pane = pane_target(session, args.pane)  # noqa: F405
+    code, _, err = tmux(["kill-pane", "-t", pane.pane_id], timeout=5)  # noqa: F405
     if code != 0:
         raise ValueError(err.strip() or f"failed to kill pane {pane.pane_id}")
     print(f"killed {pane.pane_id} ({pane.pane_title})")
@@ -3050,13 +1614,13 @@ def run_kill(args: argparse.Namespace) -> int:
 
 def run_exit(args: argparse.Namespace) -> int:
     """Kill the entire Agent Wrangler tmux session."""
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
 
     if not args.force:
         # Check for running agents and warn
-        panes = list_panes(session)
+        panes = list_panes(session)  # noqa: F405
         agents = [p for p in panes if p.agent]
         if agents:
             names = ", ".join(f"{p.pane_title}({p.agent})" for p in agents)
@@ -3073,12 +1637,12 @@ def run_exit(args: argparse.Namespace) -> int:
     # Remove nav bindings first (best-effort)
     for key in ("M-Left", "M-Right", "M-Up", "M-Down", "M-[", "M-]",
                 "M-m", "M-g", "M-z", "M-j", "M-q"):
-        tmux(["unbind-key", "-n", key], timeout=3)
+        tmux(["unbind-key", "-n", key], timeout=3)  # noqa: F405
     for idx in range(1, 10):
-        tmux(["unbind-key", "-n", f"M-{idx}"], timeout=3)
+        tmux(["unbind-key", "-n", f"M-{idx}"], timeout=3)  # noqa: F405
 
-    play_sound("Submarine", 0.3)
-    code, _, err = tmux(["kill-session", "-t", session], timeout=5)
+    play_sound("Submarine", 0.3)  # noqa: F405
+    code, _, err = tmux(["kill-session", "-t", session], timeout=5)  # noqa: F405
     if code != 0:
         raise ValueError(err.strip() or f"failed to kill session {session}")
     print(f"Agent Wrangler session '{session}' exited.")
@@ -3086,13 +1650,13 @@ def run_exit(args: argparse.Namespace) -> int:
 
 
 def run_shell(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    pane = pane_target(session, args.pane)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    pane = pane_target(session, args.pane)  # noqa: F405
 
     shell_bin = args.shell or os.environ.get("SHELL") or "zsh"
-    code, _, err = tmux(
+    code, _, err = tmux(  # noqa: F405
         ["respawn-pane", "-k", "-t", pane.pane_id, "-c", pane.pane_path, shell_bin],
         timeout=8,
     )
@@ -3100,31 +1664,31 @@ def run_shell(args: argparse.Namespace) -> int:
         raise ValueError(err.strip() or f"failed to respawn shell in pane {pane.pane_id}")
 
     if pane.project_id:
-        pane_set_project_id(pane.pane_id, pane.project_id)
-        tmux(["select-pane", "-t", pane.pane_id, "-T", pane.project_id], timeout=5)
+        pane_set_project_id(pane.pane_id, pane.project_id)  # noqa: F405
+        tmux(["select-pane", "-t", pane.pane_id, "-T", pane.project_id], timeout=5)  # noqa: F405
 
     print(f"reset {pane.pane_id} to shell '{shell_bin}'")
     return 0
 
 
 def run_layout(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    panes = list_panes(session)
-    resolved = choose_layout(args.layout, pane_count=len(panes))
-    apply_layout(session, resolved)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    panes = list_panes(session)  # noqa: F405
+    resolved = choose_layout(args.layout, pane_count=len(panes))  # noqa: F405
+    apply_layout(session, resolved)  # noqa: F405
     print(f"layout for {session}: {resolved}")
     return 0
 
 
 def run_capture(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    pane = pane_target(session, args.pane)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    pane = pane_target(session, args.pane)  # noqa: F405
     lines = max(5, args.lines)
-    code, out, err = tmux(["capture-pane", "-p", "-t", pane.pane_id, "-S", f"-{lines}"], timeout=10)
+    code, out, err = tmux(["capture-pane", "-p", "-t", pane.pane_id, "-S", f"-{lines}"], timeout=10)  # noqa: F405
     if code != 0:
         raise ValueError(err.strip() or f"failed to capture pane {pane.pane_id}")
     print(out.rstrip("\n"))
@@ -3132,21 +1696,21 @@ def run_capture(args: argparse.Namespace) -> int:
 
 
 def run_hide(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    pane = pane_target(session, args.pane)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    pane = pane_target(session, args.pane)  # noqa: F405
     project_id = pane.project_id or pane.pane_title or pane.pane_id
-    hidden_name = hide_pane(session, pane.pane_id, project_id)
+    hidden_name = hide_pane(session, pane.pane_id, project_id)  # noqa: F405
     print(f"Hidden: {project_id} -> {hidden_name}")
     return 0
 
 
 def run_show(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    hidden = list_hidden_panes(session)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    hidden = list_hidden_panes(session)  # noqa: F405
     if not hidden:
         print("No hidden panes.")
         return 0
@@ -3165,16 +1729,16 @@ def run_show(args: argparse.Namespace) -> int:
             print(f"  {h['project_id']}  ({h['agent']}, {h['status']})")
         return 1
 
-    show_pane(session, match["window_name"])
+    show_pane(session, match["window_name"])  # noqa: F405
     print(f"Restored: {match['project_id']}")
     return 0
 
 
 def run_hidden(args: argparse.Namespace) -> int:
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    hidden = list_hidden_panes(session)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    hidden = list_hidden_panes(session)  # noqa: F405
     if not hidden:
         print("No hidden panes.")
         return 0
@@ -3185,7 +1749,7 @@ def run_hidden(args: argparse.Namespace) -> int:
 
 
 def run_list_projects(args: argparse.Namespace) -> int:
-    config = load_projects_config()
+    config = load_projects_config()  # noqa: F405
     group = args.group.lower() if args.group else None
     print(f"{'ID':<22} {'GROUP':<10} PATH")
     for project in config.get("projects", []):
@@ -3196,301 +1760,11 @@ def run_list_projects(args: argparse.Namespace) -> int:
     return 0
 
 
-NOTIFY_STATE_PATH = ROOT / ".state" / "health_state.json"
-NOTIFY_APP_PATH = ROOT / "assets" / "AgentWrangler.app"
-NOTIFY_COOLDOWN_SEC = 120  # Minimum seconds between notifications
-NOTIFY_DEBOUNCE = 2  # Pane must stay in new state for N checks before notifying
-
-
-def _load_health_state() -> dict[str, Any]:
-    """Load previous pane health levels, streak counts, and last notify time."""
-    try:
-        if NOTIFY_STATE_PATH.exists():
-            return json.loads(NOTIFY_STATE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
-
-
-def _save_health_state(state: dict[str, Any]) -> None:
-    """Persist current pane health levels for change detection."""
-    try:
-        NOTIFY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        NOTIFY_STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
-    except Exception:
-        pass
-
-
-_ACTIVE_TIMES_PATH = ROOT / ".state" / "active_times.json"
-
-
-def _load_active_times() -> dict[str, float]:
-    try:
-        if _ACTIVE_TIMES_PATH.exists():
-            return json.loads(_ACTIVE_TIMES_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
-
-
-def _save_active_times(data: dict[str, float]) -> None:
-    try:
-        _ACTIVE_TIMES_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _ACTIVE_TIMES_PATH.write_text(json.dumps(data), encoding="utf-8")
-    except OSError:
-        pass
-
-
-def _notifications_enabled() -> bool:
-    """Check if notifications are enabled. Off by default.
-
-    Enable via: "notifications": true in team_grid.json, or AW_NOTIFY=1 env var.
-    """
-    if os.environ.get("AW_NOTIFY", "").strip() in ("1", "true", "yes"):
-        return True
-    try:
-        store = load_store()
-        return bool(store.get("notifications", False))
-    except Exception:
-        return False
-
-
-def _notify_desktop(title: str, message: str) -> None:
-    """Send a macOS desktop notification via AgentWrangler.app (cowboy hat icon)."""
-    try:
-        if NOTIFY_APP_PATH.is_dir():
-            # Use the bundled .app — shows cowboy hat icon
-            Path("/tmp/aw_notify.txt").write_text(f"{title}\n{message}")
-            subprocess.run(
-                ["open", "-g", "-n", str(NOTIFY_APP_PATH)],
-                timeout=5, check=False, capture_output=True,
-            )
-        else:
-            # Fallback to plain osascript
-            safe_msg = message.replace('"', '\\"')
-            safe_title = title.replace('"', '\\"')
-            subprocess.run(
-                [
-                    "osascript", "-e",
-                    f'display notification "{safe_msg}" with title "{safe_title}" sound name "Ping"',
-                ],
-                timeout=5, check=False, capture_output=True,
-            )
-    except Exception:
-        pass
-
-
-def check_and_notify(rows: list[dict[str, Any]]) -> None:
-    """Compare health state, send desktop notifications on confirmed error transitions.
-
-    Notifications are off by default. Enable with "notifications": true in team_grid.json
-    or pass --notify to paint/watch commands.
-
-    Debounce: a pane must stay red for NOTIFY_DEBOUNCE consecutive checks before
-    alerting. Same for recovery. Waiting states are never notified. Cooldown prevents
-    rapid-fire notifications.
-    """
-    if not _notifications_enabled():
-        return
-    state = _load_health_state()
-    prev_levels = state.get("levels", {})
-    streaks: dict[str, int] = state.get("streaks", {})
-    notified: dict[str, str] = state.get("notified", {})
-    last_notify = float(state.get("last_notify", 0))
-    current: dict[str, str] = {}
-    alerts: list[str] = []
-
-    for row in rows:
-        key = str(row.get("project_id") or row.get("pane_id") or "")
-        level = str(row.get("health") or "green")
-        reason = str(row.get("reason") or "")
-        current[key] = level
-
-        prev_level = prev_levels.get(key, level)
-
-        # Skip waiting states entirely — not worth notifying
-        if reason.startswith("waiting"):
-            streaks[key] = 0
-            continue
-
-        # Track consecutive checks at same level
-        if level == prev_level:
-            streaks[key] = streaks.get(key, 0) + 1
-        else:
-            streaks[key] = 1
-
-        # Only alert after NOTIFY_DEBOUNCE consecutive checks in new state
-        if streaks.get(key, 0) < NOTIFY_DEBOUNCE:
-            continue
-
-        last_notified_level = notified.get(key)
-        if level == "red" and last_notified_level != "red":
-            alerts.append(f"{key}: {reason or 'needs attention'}")
-            notified[key] = "red"
-        elif level == "green" and last_notified_level == "red":
-            alerts.append(f"{key}: recovered")
-            notified[key] = "green"
-
-    now = time.time()
-    new_state: dict[str, Any] = {
-        "levels": current,
-        "streaks": streaks,
-        "notified": notified,
-        "last_notify": last_notify,
-    }
-    if alerts and (now - last_notify) >= NOTIFY_COOLDOWN_SEC:
-        _notify_desktop("Agent Wrangler", "\n".join(alerts[:3]))
-        new_state["last_notify"] = now
-
-    _save_health_state(new_state)
-
-
-# ---------------------------------------------------------------------------
-# Activity log — append-only JSONL for graze / barn discovery
-# ---------------------------------------------------------------------------
-
-ACTIVITY_LOG_PATH = ROOT / ".state" / "activity.jsonl"
-ACTIVITY_MAX_BYTES = 5 * 1024 * 1024  # 5 MB, then rotate
-
-
-def _append_activity(entries: list[dict[str, Any]]) -> None:
-    """Append activity entries to the JSONL log.
-
-    Each entry is written as a single JSON line with an auto-added ``ts``
-    field (ISO-8601 UTC) when one is not already present.  The log file is
-    rotated to ``*.jsonl.old`` once it exceeds *ACTIVITY_MAX_BYTES*.
-
-    All errors are silently swallowed — this is a non-critical feature and
-    must never interfere with normal operation.
-    """
-    try:
-        ACTIVITY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-        # Rotate if the file is too large.
-        if ACTIVITY_LOG_PATH.exists() and ACTIVITY_LOG_PATH.stat().st_size > ACTIVITY_MAX_BYTES:
-            rotated = ACTIVITY_LOG_PATH.with_suffix(".jsonl.old")
-            ACTIVITY_LOG_PATH.replace(rotated)
-
-        now = datetime.now(timezone.utc).isoformat()
-        with ACTIVITY_LOG_PATH.open("a", encoding="utf-8") as fh:
-            for entry in entries:
-                if "ts" not in entry:
-                    entry = {**entry, "ts": now}
-                fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
-
-
-def _read_activity(*, since_minutes: float = 0, limit: int = 500) -> list[dict[str, Any]]:
-    """Read activity entries from the JSONL log.
-
-    Parameters
-    ----------
-    since_minutes:
-        When > 0, only entries whose ``ts`` field is within the last
-        *since_minutes* minutes are returned.
-    limit:
-        Maximum number of entries to return (most recent first after
-        filtering).
-
-    Returns an empty list on any error.
-    """
-    try:
-        if not ACTIVITY_LOG_PATH.exists():
-            return []
-
-        lines = ACTIVITY_LOG_PATH.read_text(encoding="utf-8").splitlines()
-        results: list[dict[str, Any]] = []
-
-        if since_minutes > 0:
-            cutoff = datetime.now(timezone.utc).timestamp() - since_minutes * 60
-            for line in lines:
-                if not line.strip():
-                    continue
-                entry = json.loads(line)
-                ts_str = entry.get("ts", "")
-                if ts_str:
-                    try:
-                        entry_ts = datetime.fromisoformat(ts_str).timestamp()
-                    except (ValueError, TypeError):
-                        continue
-                    if entry_ts >= cutoff:
-                        results.append(entry)
-                # entries without ts are skipped when filtering by time
-        else:
-            for line in lines:
-                if not line.strip():
-                    continue
-                results.append(json.loads(line))
-
-        # Return the most recent entries, respecting the limit.
-        if len(results) > limit:
-            results = results[-limit:]
-        return results
-    except Exception:
-        return []
-
-
-def _log_transitions(rows: list[dict[str, Any]]) -> None:
-    """Log health/status transitions to the activity log.
-
-    Compares each row against ``_prev_activity_state`` and emits an entry
-    when the health or status value has changed (or when the project is
-    observed for the first time).  The ``ts`` field is intentionally
-    omitted so that ``_append_activity`` adds it automatically.
-    """
-    entries: list[dict[str, Any]] = []
-    for row in rows:
-        project = str(row.get("project_id") or row.get("pane_title") or "")
-        if not project or project == "-":
-            continue
-
-        health = str(row.get("health") or "green")
-        status = str(row.get("status") or "idle")
-        agent = str(row.get("agent") or "-")
-        reason = str(row.get("reason") or "")
-        cc = row.get("cc_stats") or {}
-
-        prev = _prev_activity_state.get(project)
-
-        if prev is None:
-            event = "first_seen"
-        elif prev.get("health") != health:
-            event = f"health_{prev.get('health')}_to_{health}"
-        elif prev.get("status") != status:
-            event = f"status_{prev.get('status')}_to_{status}"
-        else:
-            # No change — skip.
-            continue
-
-        entry: dict[str, Any] = {
-            "project": project,
-            "event": event,
-            "health": health,
-            "status": status,
-            "agent": agent,
-        }
-        if reason:
-            entry["reason"] = reason
-        cost = cc.get("cost")
-        if cost is not None:
-            entry["cost"] = cost
-        context_pct = cc.get("context_pct")
-        if context_pct is not None:
-            entry["context_pct"] = context_pct
-
-        entries.append(entry)
-        _prev_activity_state[project] = {"health": health, "status": status}
-
-    if entries:
-        _append_activity(entries)
-
-
 def run_init(_: argparse.Namespace) -> int:
     """Interactive project setup — scan for git repos and create projects.json."""
-    if PROJECTS_CONFIG.exists():
+    if _core.PROJECTS_CONFIG.exists():
         try:
-            answer = input(f"{PROJECTS_CONFIG} already exists. Overwrite? [y/N] ")
+            answer = input(f"{_core.PROJECTS_CONFIG} already exists. Overwrite? [y/N] ")
         except (EOFError, KeyboardInterrupt):
             print()
             return 1
@@ -3554,25 +1828,25 @@ def run_init(_: argparse.Namespace) -> int:
         })
 
     config = {"projects": projects}
-    PROJECTS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    _core.PROJECTS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    _core.PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
-    print(f"\nCreated {PROJECTS_CONFIG} with {len(projects)} projects:")
+    print(f"\nCreated {_core.PROJECTS_CONFIG} with {len(projects)} projects:")
     for p in projects:
         print(f"  - {p['id']}")
 
     # Also create team_grid.json if missing
-    if not CONFIG_PATH.exists():
+    if not _core.CONFIG_PATH.exists():
         grid_config = {
             "default_session": "agent-grid",
             "default_layout": "tiled",
             "default_projects": [p["id"] for p in projects[:10]],
             "persistence": {"enabled": False, "autosave_minutes": 15},
             "profiles": {"current": "default", "items": {"default": {"max_panes": 10}}},
-            "updated_at": now_iso(),
+            "updated_at": now_iso(),  # noqa: F405
         }
-        CONFIG_PATH.write_text(json.dumps(grid_config, indent=2) + "\n", encoding="utf-8")
-        print(f"Created {CONFIG_PATH}")
+        _core.CONFIG_PATH.write_text(json.dumps(grid_config, indent=2) + "\n", encoding="utf-8")
+        print(f"Created {_core.CONFIG_PATH}")
 
     print("\nRun: ./scripts/agent-wrangler start")
     return 0
@@ -3584,7 +1858,7 @@ def run_add(args: argparse.Namespace) -> int:
     if not path.is_dir():
         raise ValueError(f"Not a directory: {path}")
     # Agent-wrangler is the cowboy, not a horse
-    if path == Path(SELF_PATH).resolve():
+    if path == Path(_core.SELF_PATH).resolve():
         print("Agent Wrangler is the cowboy, not a horse. It manages the grid from the manager window.")
         return 1
 
@@ -3592,8 +1866,8 @@ def run_add(args: argparse.Namespace) -> int:
 
     # Add to projects.json
     config: dict[str, Any] = {}
-    if PROJECTS_CONFIG.exists():
-        config = json.loads(PROJECTS_CONFIG.read_text(encoding="utf-8"))
+    if _core.PROJECTS_CONFIG.exists():
+        config = json.loads(_core.PROJECTS_CONFIG.read_text(encoding="utf-8"))
     projects = config.setdefault("projects", [])
 
     # Check if already exists
@@ -3607,23 +1881,23 @@ def run_add(args: argparse.Namespace) -> int:
             "path": str(path),
             "default_branch": "main",
         })
-        PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-        print(f"Added '{proj_id}' to {PROJECTS_CONFIG}")
+        _core.PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        print(f"Added '{proj_id}' to {_core.PROJECTS_CONFIG}")
 
     # Hot-add to running grid if tmux session exists
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    if session_exists(session):
-        split_for_path(session, str(path))
-        apply_layout(session, "tiled")
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    if session_exists(session):  # noqa: F405
+        split_for_path(session, str(path))  # noqa: F405
+        apply_layout(session, "tiled")  # noqa: F405
         # Tag the new pane
-        panes = list_panes(session)
+        panes = list_panes(session)  # noqa: F405
         if panes:
             last_pane = panes[-1]
-            pane_set_project_id(last_pane.pane_id, proj_id)
-            tmux(["select-pane", "-t", last_pane.pane_id, "-T", proj_id], timeout=5)
-            pane_send(last_pane.pane_id, f"echo '\\n[{proj_id}] ready'", enter=True)
-        set_window_orchestrator_format(session)
+            pane_set_project_id(last_pane.pane_id, proj_id)  # noqa: F405
+            tmux(["select-pane", "-t", last_pane.pane_id, "-T", proj_id], timeout=5)  # noqa: F405
+            pane_send(last_pane.pane_id, f"echo '\\n[{proj_id}] ready'", enter=True)  # noqa: F405
+        set_window_orchestrator_format(session)  # noqa: F405
         print(f"Added pane for '{proj_id}' to session '{session}'")
     else:
         print(f"Session '{session}' not running. Pane will appear on next start.")
@@ -3634,31 +1908,31 @@ def run_add(args: argparse.Namespace) -> int:
 def run_remove(args: argparse.Namespace) -> int:
     """Remove a project from config and optionally kill its grid pane."""
     proj_id = args.project
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
 
     # Remove from projects.json
     removed_from_config = False
-    if PROJECTS_CONFIG.exists():
-        config = json.loads(PROJECTS_CONFIG.read_text(encoding="utf-8"))
+    if _core.PROJECTS_CONFIG.exists():
+        config = json.loads(_core.PROJECTS_CONFIG.read_text(encoding="utf-8"))
         projects = config.get("projects", [])
         before = len(projects)
         config["projects"] = [p for p in projects if p.get("id") != proj_id]
         if len(config["projects"]) < before:
-            PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+            _core.PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
             removed_from_config = True
-            print(f"Removed '{proj_id}' from {PROJECTS_CONFIG}")
+            print(f"Removed '{proj_id}' from {_core.PROJECTS_CONFIG}")
 
     if not removed_from_config:
         print(f"Project '{proj_id}' not found in config.")
 
     # Kill the pane in the running grid if it exists
-    if session_exists(session):
+    if session_exists(session):  # noqa: F405
         try:
-            pane = pane_target(session, proj_id)
-            tmux(["kill-pane", "-t", pane.pane_id], timeout=5)
-            apply_layout(session, "tiled")
-            set_window_orchestrator_format(session)
+            pane = pane_target(session, proj_id)  # noqa: F405
+            tmux(["kill-pane", "-t", pane.pane_id], timeout=5)  # noqa: F405
+            apply_layout(session, "tiled")  # noqa: F405
+            set_window_orchestrator_format(session)  # noqa: F405
             print(f"Killed pane for '{proj_id}' in session '{session}'")
         except (ValueError, RuntimeError):
             if removed_from_config:
@@ -3667,49 +1941,13 @@ def run_remove(args: argparse.Namespace) -> int:
     return 0
 
 
-def _set_barn_flag(proj_id: str, barn: bool) -> bool:
-    """Set or clear the barn flag for a project in projects.json. Returns True if found."""
-    if not PROJECTS_CONFIG.exists():
-        return False
-    config = json.loads(PROJECTS_CONFIG.read_text(encoding="utf-8"))
-    found = False
-    for p in config.get("projects", []):
-        if p.get("id") == proj_id:
-            if barn:
-                p["barn"] = True
-            else:
-                p.pop("barn", None)
-            found = True
-            break
-    if found:
-        PROJECTS_CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-    return found
-
-
-def _resolve_project_id(token: str, session: str) -> tuple[str, str | None]:
-    """Resolve a token (project id, pane id, index) to (project_id, pane_id).
-
-    If the token is a pane ID like %5, look up the pane and return its project_id.
-    """
-    pane_id = None
-    if session_exists(session):
-        try:
-            pane = pane_target(session, token)
-            pane_id = pane.pane_id
-            if pane.project_id and pane.project_id != "-":
-                return pane.project_id, pane_id
-        except (ValueError, RuntimeError):
-            pass
-    return token, pane_id
-
-
 def run_barn(args: argparse.Namespace) -> int:
     """Send a project to the barn — remove from grid, keep in config."""
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    proj_id, pane_id = _resolve_project_id(args.project, session)
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    proj_id, pane_id = _resolve_project_id(args.project, session)  # noqa: F405
 
-    if not _set_barn_flag(proj_id, barn=True):
+    if not _set_barn_flag(proj_id, barn=True):  # noqa: F405
         print(f"Project '{proj_id}' not found in config.")
         return 1
 
@@ -3718,9 +1956,9 @@ def run_barn(args: argparse.Namespace) -> int:
     # Kill the pane in the running grid
     if pane_id:
         try:
-            tmux(["kill-pane", "-t", pane_id], timeout=5)
-            apply_layout(session, "tiled")
-            set_window_orchestrator_format(session)
+            tmux(["kill-pane", "-t", pane_id], timeout=5)  # noqa: F405
+            apply_layout(session, "tiled")  # noqa: F405
+            set_window_orchestrator_format(session)  # noqa: F405
             print(f"Removed pane from grid.")
         except (ValueError, RuntimeError):
             pass
@@ -3731,29 +1969,29 @@ def run_barn(args: argparse.Namespace) -> int:
 def run_unbarn(args: argparse.Namespace) -> int:
     """Let a project out of the barn — add back to grid."""
     proj_id = args.project
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
 
-    if not _set_barn_flag(proj_id, barn=False):
+    if not _set_barn_flag(proj_id, barn=False):  # noqa: F405
         print(f"Project '{proj_id}' not found in config.")
         return 1
 
     print(f"Let '{proj_id}' out of the barn.")
 
     # Hot-add to running grid
-    if session_exists(session):
-        proj_map = project_map()
-        proj = proj_map.get(proj_id)
+    if session_exists(session):  # noqa: F405
+        proj_map_data = project_map()  # noqa: F405
+        proj = proj_map_data.get(proj_id)
         path = str(proj.get("path", "")) if proj else ""
         if path:
-            split_for_path(session, path)
-            apply_layout(session, "tiled")
-            panes = list_panes(session)
+            split_for_path(session, path)  # noqa: F405
+            apply_layout(session, "tiled")  # noqa: F405
+            panes = list_panes(session)  # noqa: F405
             if panes:
                 last_pane = panes[-1]
-                pane_set_project_id(last_pane.pane_id, proj_id)
-                tmux(["select-pane", "-t", last_pane.pane_id, "-T", proj_id], timeout=5)
-            set_window_orchestrator_format(session)
+                pane_set_project_id(last_pane.pane_id, proj_id)  # noqa: F405
+                tmux(["select-pane", "-t", last_pane.pane_id, "-T", proj_id], timeout=5)  # noqa: F405
+            set_window_orchestrator_format(session)  # noqa: F405
             print(f"Added pane to grid.")
     else:
         print(f"Session not running. Will appear on next start.")
@@ -3763,7 +2001,7 @@ def run_unbarn(args: argparse.Namespace) -> int:
 
 def run_barn_list(args: argparse.Namespace) -> int:
     """List projects in the barn."""
-    config = load_projects_config()
+    config = load_projects_config()  # noqa: F405
     barn_projects = [p for p in config.get("projects", []) if p.get("barn")]
     active_projects = [p for p in config.get("projects", []) if not p.get("barn")]
 
@@ -3784,12 +2022,12 @@ def run_barn_list(args: argparse.Namespace) -> int:
 
 def run_summary(args: argparse.Namespace) -> int:
     """Show a summary of recent output from a pane."""
-    ensure_tmux()
-    store = load_store()
-    session = args.session or store.get("default_session") or DEFAULT_SESSION
-    pane = pane_target(session, args.pane)
+    ensure_tmux()  # noqa: F405
+    store = load_store()  # noqa: F405
+    session = args.session or store.get("default_session") or _core.DEFAULT_SESSION
+    pane = pane_target(session, args.pane)  # noqa: F405
     lines = max(10, int(args.lines))
-    raw = capture_pane_raw(pane.pane_id, lines=lines)
+    raw = capture_pane_raw(pane.pane_id, lines=lines)  # noqa: F405
 
     # Extract meaningful lines (skip empty, prompts-only)
     meaningful: list[str] = []
@@ -3812,7 +2050,7 @@ def run_summary(args: argparse.Namespace) -> int:
 
 
 def _run_ops_command(command: list[str]) -> int:
-    cmd = [str(ROOT / "scripts" / "agent-wrangler"), *command]
+    cmd = [str(_core.ROOT / "scripts" / "agent-wrangler"), *command]
     print("")
     print("$ " + " ".join(cmd))
     proc = subprocess.run(cmd, check=False, timeout=120)
@@ -3849,10 +2087,10 @@ def run_ops(_: argparse.Namespace) -> int:
 
     # Try to show quick health summary
     try:
-        store = load_store()
-        session = store.get("default_session") or DEFAULT_SESSION
-        if session_exists(session):
-            rows = refresh_pane_health(session, capture_lines=40, wait_attention_min=5, apply_colors=False)
+        store = load_store()  # noqa: F405
+        session = store.get("default_session") or _core.DEFAULT_SESSION
+        if session_exists(session):  # noqa: F405
+            rows = refresh_pane_health(session, capture_lines=40, wait_attention_min=5, apply_colors=False)  # noqa: F405
             dot_map = {"green": "\033[32m●", "yellow": "\033[33m●", "red": "\033[31m●"}
             herd_line = "  Herd: "
             for row in rows:
@@ -3914,7 +2152,7 @@ def run_briefing(args: argparse.Namespace) -> int:
     RST = "\033[0m"
 
     since = getattr(args, "since", 60)
-    entries = _read_activity(since_minutes=since)
+    entries = _core._read_activity(since_minutes=since)
 
     if not entries:
         print(f"{DIM}No activity recorded in the last {since} minutes.{RST}")
@@ -4068,6 +2306,8 @@ def run_briefing(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── Subparser registration & main ─────────────────────────────────
+
 def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None:
     teams = root_subparsers.add_parser("teams", help="Tmux team grid operations")
     teams_sub = teams.add_subparsers(dest="teams_command", required=True)
@@ -4075,7 +2315,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     up = teams_sub.add_parser("up", help="One-command entry: build/reuse grid, show status, attach")
     up.add_argument("--session", default=None)
     up.add_argument("--mode", choices=["import", "bootstrap"], default="import")
-    up.add_argument("--layout", choices=LAYOUT_CHOICES, default=None)
+    up.add_argument("--layout", choices=_core.LAYOUT_CHOICES, default=None)
     up.add_argument("--max-panes", type=int, default=10)
     up.add_argument("--projects", help="Comma-separated project ids (used for bootstrap or fallback)")
     up.add_argument("--group", choices=["business", "personal"], help="Project group for bootstrap/fallback")
@@ -4106,8 +2346,8 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     bootstrap.add_argument("--session", default=None)
     bootstrap.add_argument("--projects", help="Comma-separated project ids")
     bootstrap.add_argument("--group", choices=["business", "personal"], help="Autoselect from a project group")
-    bootstrap.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Max panes when auto-selecting")
-    bootstrap.add_argument("--layout", choices=LAYOUT_CHOICES, default=None)
+    bootstrap.add_argument("--limit", type=int, default=_core.DEFAULT_LIMIT, help="Max panes when auto-selecting")
+    bootstrap.add_argument("--layout", choices=_core.LAYOUT_CHOICES, default=None)
     bootstrap.add_argument("--force", action="store_true", help="Replace existing session with same name")
     bootstrap.add_argument("--no-startup", action="store_true", help="Do not run per-project startup commands")
     bootstrap.add_argument("--agent", help="Agent command to run in each pane (example: claude or codex)")
@@ -4116,7 +2356,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
 
     imp = teams_sub.add_parser("import", help="Import current Ghostty sessions into a tmux grid")
     imp.add_argument("--session", default=None)
-    imp.add_argument("--layout", choices=LAYOUT_CHOICES, default=None)
+    imp.add_argument("--layout", choices=_core.LAYOUT_CHOICES, default=None)
     imp.add_argument("--max-panes", type=int, default=10, help="Max panes to import from Ghostty")
     imp.add_argument("--include-idle", action="store_true", help="Include idle Ghostty sessions when mapping")
     imp.add_argument(
@@ -4242,7 +2482,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     shell.set_defaults(handler=run_shell)
 
     layout = teams_sub.add_parser("layout", help="Change tmux layout")
-    layout.add_argument("layout", choices=LAYOUT_CHOICES)
+    layout.add_argument("layout", choices=_core.LAYOUT_CHOICES)
     layout.add_argument("--session", default=None)
     layout.set_defaults(handler=run_layout)
 
@@ -4280,7 +2520,7 @@ def register_subparser(root_subparsers: argparse._SubParsersAction[Any]) -> None
     persistence_restore.add_argument("--session", default=None)
     persistence_restore.add_argument("--name", help="Snapshot name (without .json is fine)")
     persistence_restore.add_argument("--file", help="Explicit snapshot file path")
-    persistence_restore.add_argument("--layout", choices=LAYOUT_CHOICES, default=None)
+    persistence_restore.add_argument("--layout", choices=_core.LAYOUT_CHOICES, default=None)
     persistence_restore.add_argument("--startup", action="store_true", help="Run startup commands after restore")
     persistence_restore.add_argument("--agent", action="store_true", help="Relaunch detected agents after restore")
     persistence_restore.add_argument("--force", action="store_true", help="Replace existing session")
