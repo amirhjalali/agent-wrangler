@@ -1904,6 +1904,11 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
     global _last_active_time
     _last_active_time = _load_active_times()
 
+    _append_activity([{
+        "project": "_system",
+        "event": "rail_started",
+    }])
+
     while True:
         if not session_exists(session):
             print(f"Session '{session}' not found.")
@@ -2124,6 +2129,10 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
                         break
         except KeyboardInterrupt:
             break
+    _append_activity([{
+        "project": "_system",
+        "event": "rail_stopped",
+    }])
     return 0
 
 
@@ -3912,12 +3921,6 @@ def run_briefing(args: argparse.Namespace) -> int:
         print(f"{DIM}The rail must be running to collect activity data.{RST}")
         return 0
 
-    # Group entries by project
-    by_project: dict[str, list[dict[str, Any]]] = {}
-    for e in entries:
-        proj = e.get("project", "unknown")
-        by_project.setdefault(proj, []).append(e)
-
     # Calculate time span
     all_ts: list[datetime] = []
     for e in entries:
@@ -3940,6 +3943,38 @@ def run_briefing(args: argparse.Namespace) -> int:
     print(f"\n{RUST}{'=' * 60}{RST}")
     print(f"{RUST}  BRIEFING{RST}  {DIM}last {since} minutes{RST}")
     print(f"{RUST}{'=' * 60}{RST}\n")
+
+    # Show monitoring windows
+    system_events = [e for e in entries if e.get("project") == "_system"]
+    if system_events:
+        starts = [e for e in system_events if e.get("event") == "rail_started"]
+        stops = [e for e in system_events if e.get("event") == "rail_stopped"]
+        if starts or stops:
+            if starts:
+                # Parse ISO ts for display
+                last_start_ts = starts[-1].get("ts", "")
+                try:
+                    t = datetime.fromisoformat(last_start_ts).strftime("%H:%M:%S")
+                except Exception:
+                    t = "?"
+                print(f"  {DIM}Monitoring started: {t}{RST}")
+            if stops:
+                last_stop_ts = stops[-1].get("ts", "")
+                try:
+                    t = datetime.fromisoformat(last_stop_ts).strftime("%H:%M:%S")
+                except Exception:
+                    t = "?"
+                print(f"  {DIM}Monitoring stopped: {t}{RST}")
+            print()
+
+    # Filter out system events from per-project display
+    project_entries = [e for e in entries if e.get("project") != "_system"]
+
+    # Group entries by project
+    by_project: dict[str, list[dict[str, Any]]] = {}
+    for e in project_entries:
+        proj = e.get("project", "unknown")
+        by_project.setdefault(proj, []).append(e)
 
     needs_attention: list[str] = []
     total_health_counts: dict[str, int] = {}
