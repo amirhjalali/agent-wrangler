@@ -1,190 +1,111 @@
-```
-   █████   ██████  ███████ ███    ██ ████████            ▄███▄
-  ██   ██ ██       ██      ████   ██    ██             ▄███████▄
-  ███████ ██   ███ █████   ██ ██  ██    ██       ▄▀▀▀▀███████████▀▀▀▀▄
-  ██   ██ ██    ██ ██      ██  ██ ██    ██        ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-  ██   ██  ██████  ███████ ██   ████    ██
+# Agent Wrangler
 
-  ██     ██ ██████   █████  ███    ██  ██████  ██      ███████ ██████
-  ██     ██ ██   ██ ██   ██ ████   ██ ██       ██      ██      ██   ██
-  ██  █  ██ ██████  ███████ ██ ██  ██ ██   ███ ██      █████   ██████
-  ██ ███ ██ ██   ██ ██   ██ ██  ██ ██ ██    ██ ██      ██      ██   ██
-   ███ ███  ██   ██ ██   ██ ██   ████  ██████  ███████ ███████ ██   ██
-```
+Tmux-based control layer for managing teams of AI coding agents across multiple repos from one terminal.
 
-**Manage teams of AI coding agents from one terminal.**
-
-Agent Wrangler gives you a tmux grid where each pane is a project with an AI agent (Claude Code, Codex, Aider, Gemini). Color-coded borders show which agents are working, waiting, or broken. One command to start, zero config required.
-
-```
-┌──── ● my-webapp ────────┬──── ⚑ api-server ────────┐
-│                         │                           │
-│  $ claude               │  $ codex                  │
-│  > implementing auth    │  (waiting 3m)             │
-│                         │                           │
-├──── ● side-project ─────┼──── ✖ data-pipeline ──────┤
-│                         │                           │
-│  $ aider                │  (idle 45m)               │
-│  > refactoring tests    │                           │
-│                         │                           │
-└─────────────────────────┴───────────────────────────┘
-  ● green = working    ⚑ yellow = needs attention    ✖ red = problem
-```
-
----
-
-## Install
+## Quick Start
 
 ```bash
-brew install tmux
-
 git clone https://github.com/AmirhJalworker/agent-wrangler.git
 cd agent-wrangler
-```
-
-Python 3.10+ required. No pip install, no venv, no build step — just stdlib.
-
-## Ghostty Setup (Recommended)
-
-Agent Wrangler works best inside Ghostty. Add to your Ghostty config (`~/Library/Application Support/com.mitchellh.ghostty/config`):
-
-```
-macos-option-as-alt = true
-mouse-hide-while-typing = true
-window-padding-x = 4
-window-padding-y = 4
-window-padding-balance = true
-```
-
-`macos-option-as-alt` is required for Option+key navigation to work.
-
-## Start
-
-```bash
 ./scripts/agent-wrangler start
 ```
 
-That's it. Agent Wrangler auto-discovers your running Ghostty terminals, imports them into a tmux grid, and sets up a manager window with Claude Code + a live status rail. No config file needed.
+Agent Wrangler auto-discovers your running Ghostty terminals, imports them into a tmux grid with health-aware borders, and opens a manager window. No config file needed.
 
-If you want more control, create a project list:
+## What It Does
 
-```bash
-./scripts/agent-wrangler init
-```
+- **Auto-discovery** -- scans running Ghostty terminals by process tree, matches each to a project by working directory, imports unknown terminals by directory name. Zero config required.
+- **Health monitoring** -- scrollback-based detection of agent state. Green = generating output, yellow = waiting at prompt, red = error or stalled. Health shown in pane borders, status rail, and status bar.
+- **Manager mode** -- dedicated window with Claude Code (left 75%) and a live-refreshing status rail (right 25%). Orchestrate all agents from one place.
+- **Barn system** -- temporarily remove projects from the grid without losing config. Barn a project when you don't need it, unbarn to bring it back.
+- **Walk-away briefing** -- run `briefing` after stepping away to see what changed: which agents finished, which errored, git drift across all panes.
+- **Auto-pilot agents** -- start Claude Code, Codex, Aider, or Gemini in any pane. Send commands, stop agents, capture output, restart with one command.
 
-This scans your home directory for git repos and lets you pick which ones to include.
+## Commands
 
-## Navigate
+All commands are invoked as `./scripts/agent-wrangler <command>`.
 
-| Shortcut | What it does |
-|---|---|
-| `Option+g` | Switch to grid (your agent panes) |
-| `Option+m` | Switch to manager (Claude Code + status rail) |
+| Command | Description |
+|---------|-------------|
+| `start` | Launch grid + manager + nav bindings (full startup) |
+| `status` | One-shot pane health overview |
+| `add [path]` | Add a project to config and running grid |
+| `remove <project>` | Remove a project from config and kill its pane |
+| `summary <pane>` | Show recent output summary from a pane |
+| `briefing` | Show what happened while you were away |
+| `ops` | Interactive operator console |
+| `agent <pane> <tool>` | Start an AI agent (claude, codex, aider, gemini) in a pane |
+| `stop <pane>` | Send Ctrl-C to a pane |
+| `restart <pane>` | Restart pane with its startup command |
+| `send <pane> --command "..."` | Send a command to a pane |
+| `capture <pane> --lines N` | Capture raw pane output |
+| `doctor` | Diagnose broken or waiting agent panes |
+| `drift` | Show git drift for pane projects |
+| `barn <project>` | Send a project to the barn (remove from grid, keep in config) |
+| `unbarn <project>` | Bring a project back from the barn into the grid |
+| `barn-list` | List projects: grazing (active) vs in the barn |
+| `hide <pane>` | Hide a pane (agent keeps running in background) |
+| `show <pane>` | Restore a hidden pane to the grid |
+| `hidden` | List hidden panes |
+| `exit` | Kill the Agent Wrangler session |
+| `init` | Interactive project setup (scan repos, create config) |
+
+## Navigation
+
+All shortcuts use the Option key (requires `macos-option-as-alt = true` in Ghostty config).
+
+| Shortcut | Action |
+|----------|--------|
 | `Option+Arrow` | Move between panes |
+| `Option+m` | Switch to manager window |
+| `Option+g` | Switch to grid window |
 | `Option+z` | Zoom current pane to fullscreen (toggle) |
-| `Option+n` / `p` | Next / previous pane (works while zoomed) |
+| `Option+n` / `Option+p` | Next / previous pane (works while zoomed) |
 | `Option+j` | Jump to pane by number |
-| `Option+[` / `]` | Previous / next window |
+| `Option+[` / `Option+]` | Previous / next window |
 | `Option+q` | Exit Agent Wrangler |
-| **Click** | Select a pane |
-| **Double-click** | Zoom pane to fullscreen |
-| **Right-click** | Context menu (start agent, send command, etc.) |
-| **Scroll** | Browse pane output |
+| Click | Select a pane |
+| Double-click | Zoom pane to fullscreen |
+| Right-click | Context menu |
+| Scroll | Browse pane output |
 
-## Control agents
-
-Launch an AI agent in any pane:
-
-```bash
-./scripts/agent-wrangler agent my-webapp claude
-./scripts/agent-wrangler agent api-server codex
-```
-
-Send commands, stop agents, or grab output:
-
-```bash
-./scripts/agent-wrangler send my-webapp --command "git status"
-./scripts/agent-wrangler stop my-webapp
-./scripts/agent-wrangler capture my-webapp --lines 40
-```
-
-## Add projects on the fly
-
-```bash
-cd ~/projects/new-thing
-./scripts/agent-wrangler add .
-```
-
-Or specify a path:
-
-```bash
-./scripts/agent-wrangler add ~/projects/cool-app --name cool-app
-```
-
-If the grid is running, the pane appears immediately.
-
-## Pane summary
-
-See what an agent has been doing:
-
-```bash
-./scripts/agent-wrangler summary my-webapp
-```
-
-Or press `Option+s` on any pane for a popup summary.
-
-## Monitor
-
-The **status bar** at the bottom of the grid shows aggregate health, agent count, context %, and cost at a glance.
-
-The **status rail** (right side of manager window) auto-refreshes and shows:
-- Health dot per pane (green/yellow/red)
-- Agent type (claude, codex, aider, gemini)
-- Context window % and cost for Claude Code sessions
-- Hidden panes (dimmed)
-- Desktop notifications when a pane goes red (macOS, opt-in)
-
-Other monitoring commands:
-
-```bash
-./scripts/agent-wrangler watch             # live health table
-./scripts/agent-wrangler status            # one-shot health overview
-```
-
-## Hide and show
-
-Don't need a pane right now? Hide it — the agent keeps running in the background:
-
-```bash
-./scripts/agent-wrangler hide my-webapp
-./scripts/agent-wrangler show my-webapp
-./scripts/agent-wrangler hidden            # list what's hidden
-```
-
-## How it works
-
-Agent Wrangler is pure Bash + Python stdlib. No frameworks, no dependencies.
+## Architecture
 
 ```
-agent-wrangler           Bash router
-agent_wrangler.py        Grid control, health coloring, manager, rail, ops
-terminal_sentinel.py     Process monitoring, AI tool classification
-───────────────────────────────────────────────────
-Ghostty / tmux           Terminal substrate
+scripts/agent-wrangler         Bash router -- translates subcommands, calls agent_wrangler.py
+scripts/agent_wrangler.py      Engine -- grid management, health detection, manager, rail, ops, nav
+scripts/terminal_sentinel.py   Process monitoring -- classifies terminals, detects AI tools
+scripts/welcome_banner.sh      Startup banner animation
+config/                        projects.json (project registry) + team_grid.json (session config)
+.state/                        Runtime persistence (tmux snapshots, session stats)
 ```
 
-**Auto-discovery**: On startup, Agent Wrangler scans running Ghostty terminals via process trees. Each terminal is matched to a project by its working directory. Unmatched terminals are imported using their directory name — no config file required.
+The bash router handles startup sequencing and subcommand translation. All core logic lives in `agent_wrangler.py`, which uses `argparse` for CLI dispatch and `subprocess` for tmux control. `terminal_sentinel.py` provides Ghostty process discovery and AI tool classification.
 
-**Health detection**: Scrollback-based. Each pane's text is captured and checked for the agent's prompt character (`❯` for Claude Code, `aider>` for Aider). If the prompt is visible, the agent is waiting for input (yellow). If there's streaming output, it's working (green). This works because AI tools think on remote servers — local CPU tells you nothing.
+## Configuration
 
-**Notifications**: Optional desktop alerts (macOS) when a pane goes red. Off by default — enable with `"notifications": true` in `config/team_grid.json` or `AW_NOTIFY=1`.
+**`config/projects.json`** -- Project registry. Each entry has `id`, `name`, `path`, and `startup_command`. Auto-created by discovery or manually via `init`. Optional: Agent Wrangler works without it by auto-importing Ghostty terminals.
 
-## Environment variables
+**`config/team_grid.json`** -- Session config with workspace profiles (`max_panes`), notification toggle, and persistence settings.
+
+Run `./scripts/agent-wrangler init` for interactive setup: scans your home directory for git repos and lets you pick which ones to include.
+
+Environment variables:
 
 | Variable | Description |
-|---|---|
-| `AW_MAX_PANES` | Max panes in grid (default: 10, or set via profile) |
+|----------|-------------|
+| `AW_MAX_PANES` | Override max panes in grid (default: 10) |
 | `AW_NOTIFY` | Enable desktop notifications (`1` to enable) |
+| `AW_SOUNDS` | Enable sound effects (`1` to enable) |
+
+## Requirements
+
+- Python 3.10+
+- tmux
+- macOS (uses macOS-specific features for notifications and sounds)
+- Ghostty terminal (recommended; set `macos-option-as-alt = true` in config)
+
+No pip install, no virtual environment, no build step. Pure stdlib Python and Bash.
 
 ## License
 
