@@ -23,6 +23,9 @@ All commands run from the repo root.
 - `./scripts/agent-wrangler init` — Interactive project setup (scan repos, create config)
 - `./scripts/agent-wrangler add .` — Add current directory to config + running grid
 - `./scripts/agent-wrangler summary <pane>` — Show recent pane output
+- `./scripts/agent-wrangler briefing` — Show what happened while you were away
+- `./scripts/agent-wrangler dispatch` — Send a prompt to multiple agents at once
+- `./scripts/agent-wrangler barn-list` — Show projects: grazing vs in the barn
 - `./scripts/agent-wrangler exit` — Kill session
 
 **No build step, no test suite.** Pure Python 3.10+ and Bash. No package manager or virtual environment needed. All dependencies are stdlib.
@@ -33,7 +36,9 @@ All commands run from the repo root.
 
 ```
 scripts/agent-wrangler       Bash router — translates subcommands, calls agent_wrangler.py
-scripts/agent_wrangler.py    The engine — all tmux grid, health, manager, rail, ops, nav logic
+scripts/agent_wrangler.py    Command handlers — all run_* functions, argparse, main()
+scripts/aw/core.py           Core library — tmux wrappers, health detection, grid ops, activity log
+scripts/aw/rail.py           Rail rendering — auto-refreshing status display, barn discovery, stall tracking
 scripts/terminal_sentinel.py Process monitoring — classifies terminals, detects AI tools
 scripts/welcome_banner.sh    Startup banner
 ```
@@ -58,6 +63,7 @@ After `agent-wrangler start`, the tmux session has two window types:
 - **Health detection**: Scrollback-based — captures pane text and looks for the agent's prompt character (`❯` for Claude Code, `>` for Codex/Gemini, etc.). Green = generating output, yellow = at prompt waiting for input. CPU-based detection doesn't work because AI tools think on remote servers.
 - **Zoomed navigation**: `Option+z` zooms a pane to fullscreen. `Option+n`/`Option+p` cycle panes while staying zoomed — each pane feels like a full terminal window.
 - **Notifications**: Optional (off by default). Desktop alerts via bundled macOS `.app` with debounce (2 consecutive checks) and cooldown (120s).
+- **Activity log**: State transitions logged to `.state/activity.jsonl` during rail refresh. Powers briefing command and auto-recovery.
 
 ### Configuration Files (all in `config/`)
 
@@ -94,6 +100,21 @@ When running as the manager session (the left pane of the manager window), you c
 - `./scripts/agent-wrangler send <project> --command "..."` — Send text to a pane
 - `./scripts/agent-wrangler stop <project>` — Send Ctrl-C
 - `./scripts/agent-wrangler restart <project>` — Restart with startup command
+- `./scripts/agent-wrangler briefing` — See all state changes since you left
+- `./scripts/agent-wrangler dispatch` — Send a prompt to multiple agents at once
+
+## Walk-Away Mode
+
+Agent Wrangler logs state transitions to `.state/activity.jsonl` while the rail is running. When you come back:
+
+- `./scripts/agent-wrangler briefing` — See all state changes, errors, costs since you left
+- `./scripts/agent-wrangler briefing --since 120` — Look back 2 hours
+
+Stall detection shows idle time next to waiting agents in the rail. After 10 minutes idle, time is shown in red.
+
+### Auto-Recovery (opt-in)
+
+Set `AW_AUTO_RECOVER=1` or add `"auto_recover": true` to `team_grid.json`. Agents stalled for >20 minutes get automatically restarted with `claude --dangerously-skip-permissions`. 5-minute cooldown per project.
 
 ### Managed Projects
 @/Users/amirjalali/creator-studio/CLAUDE.md
