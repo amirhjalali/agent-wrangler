@@ -23,6 +23,8 @@ from aw.core import (
     _health_history, _prev_rail_health, _prev_rail_costs,
     _sparkle_countdown,
     _last_active_time, _STALL_THRESHOLD_MIN,
+    # Auto-recovery
+    _auto_recover_enabled, attempt_recovery, _AUTO_RECOVER_THRESHOLD_MIN,
     # _campfire_frame is a single-element list in core for cross-module mutability
     _campfire_frame,
 )
@@ -278,6 +280,17 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int) -> int:
                     line += f" \033[31m{int(idle_min)}m idle\033[0m"
                 elif idle_min >= 2:
                     line += f" \033[2m{int(idle_min)}m\033[0m"
+
+            # Auto-recovery: restart stalled agents
+            if (health == "yellow" and project in _last_active_time
+                    and agent and agent != "-"
+                    and _auto_recover_enabled()):
+                idle_min_check = (time.time() - _last_active_time[project]) / 60.0
+                if idle_min_check >= _AUTO_RECOVER_THRESHOLD_MIN:
+                    pane_id = str(row.get("pane_id") or "")
+                    if pane_id and attempt_recovery(session, project, pane_id):
+                        line += f" \033[33m⟳\033[0m"
+                        _last_active_time[project] = time.time()
 
             lines.append(line)
 

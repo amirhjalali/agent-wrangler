@@ -91,6 +91,46 @@ def play_sound(name: str, volume: float = 0.5, key: str = "") -> None:
             pass
 
 
+def _auto_recover_enabled() -> bool:
+    """Check if auto-recovery is enabled. Off by default."""
+    if os.environ.get("AW_AUTO_RECOVER", "").strip() in ("1", "true", "yes"):
+        return True
+    try:
+        store = load_store()
+        return bool(store.get("auto_recover", False))
+    except Exception:
+        return False
+
+
+def attempt_recovery(session: str, project_id: str, pane_id: str) -> bool:
+    """Send Ctrl-C + restart Claude for a stalled pane. Returns True if attempted."""
+    now = time.time()
+    last = _recovery_cooldown.get(project_id, 0)
+    if now - last < _RECOVERY_COOLDOWN_SEC:
+        return False
+
+    _recovery_cooldown[project_id] = now
+
+    try:
+        pane_ctrl_c(pane_id)
+    except ValueError:
+        return False
+
+    time.sleep(0.5)
+
+    try:
+        pane_send(pane_id, "claude --dangerously-skip-permissions", enter=True)
+    except ValueError:
+        return False
+
+    _append_activity([{
+        "project": project_id,
+        "event": "auto_recovered",
+    }])
+
+    return True
+
+
 # --- Health history for sparklines (Phase 2) ---
 _health_history: dict[str, list[int]] = {}  # project_id → last N health values
 _prev_rail_health: dict[str, str] = {}  # project_id → previous health level
@@ -101,6 +141,11 @@ _campfire_frame = [0]  # flickering campfire frame counter (list for cross-modul
 _prev_activity_state: dict[str, dict[str, Any]] = {}  # project_id -> last logged state
 _last_active_time: dict[str, float] = {}  # project_id -> timestamp when last seen green
 _STALL_THRESHOLD_MIN = 10  # minutes of waiting after being active = stalled
+
+# --- Auto-recovery for stalled agents ---
+_AUTO_RECOVER_THRESHOLD_MIN = 20  # minutes idle before auto-recovery
+_recovery_cooldown: dict[str, float] = {}  # project -> last recovery timestamp
+_RECOVERY_COOLDOWN_SEC = 300  # 5 min between recovery attempts per project
 
 
 @dataclass
