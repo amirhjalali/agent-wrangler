@@ -1901,6 +1901,8 @@ def run_rail(args: argparse.Namespace) -> int:
 def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any) -> int:
     """Inner rail loop (separated so tty restore happens in finally)."""
     global _campfire_frame
+    global _last_active_time
+    _last_active_time = _load_active_times()
 
     while True:
         if not session_exists(session):
@@ -2031,6 +2033,8 @@ def _rail_loop(args: argparse.Namespace, session: str, interval: int, _time: Any
                 f" \033[36m{claude_count} claude\033[0m  "
                 f"\033[2m{total_tokens_k}k tok  ${total_cost:.2f}\033[0m"
             )
+
+        _save_active_times(_last_active_time)
 
         # --- Hidden panes ---
         hidden = list_hidden_panes(session)
@@ -3205,6 +3209,26 @@ def _save_health_state(state: dict[str, Any]) -> None:
         NOTIFY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         NOTIFY_STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
     except Exception:
+        pass
+
+
+_ACTIVE_TIMES_PATH = ROOT / ".state" / "active_times.json"
+
+
+def _load_active_times() -> dict[str, float]:
+    try:
+        if _ACTIVE_TIMES_PATH.exists():
+            return json.loads(_ACTIVE_TIMES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_active_times(data: dict[str, float]) -> None:
+    try:
+        _ACTIVE_TIMES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ACTIVE_TIMES_PATH.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
         pass
 
 
