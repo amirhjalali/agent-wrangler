@@ -5,7 +5,7 @@ Tmux-based control layer for managing teams of AI coding agents across multiple 
 ## Quick Start
 
 ```bash
-git clone https://github.com/AmirhJalworker/agent-wrangler.git
+git clone https://github.com/amirhjalali/agent-wrangler.git
 cd agent-wrangler
 ./scripts/agent-wrangler start
 ```
@@ -107,6 +107,16 @@ Environment variables:
 
 No pip install, no virtual environment, no build step. Pure stdlib Python and Bash.
 
+## Development
+
+Run the test suite:
+
+```bash
+python3 -m pytest tests/ -v
+```
+
+No build step is required.
+
 ## License
 
-MIT
+[MIT](LICENSE)
